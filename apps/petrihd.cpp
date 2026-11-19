@@ -7,6 +7,7 @@
 //           [--zoom Z] [--at X,Y]      (start zoom, 1-256, and focus cell)
 //           [--flat] [--relief K]      (no tilted view; display cells per metre)
 //           [--pixel N]                (screen pixels per art pixel, default 2)
+//           [--shoreline-study]        (open the spring shoreline art study)
 //
 // Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
 // T locks the camera top-down, G turns the tilted view off and on, O puts
@@ -23,6 +24,7 @@
 #include <cstdarg>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -167,11 +169,14 @@ SDL_GLContext create_context(SDL_Window*& window, int width, int height) {
 int main(int argc, char** argv) {
     phd::WorldConfig config;
     int width = 800, height = 480;
-    std::string load, shot, save_path = "petrihd.phdw";
+    std::string load, shot;
     bool quit_after_shot = false;
-    int bench_frames = 0, start_speed = 1;
-    long long skip_ticks = 0;
-    float start_zoom = 2, relief = 10.0f / float(phd::cell_decimetres), at_x = -1, at_y = -1;
+    bool shoreline_study = false;
+    int bench_frames = 0;
+    std::optional<int> start_speed;
+    std::optional<long long> skip_ticks;
+    std::optional<float> start_zoom;
+    float relief = 10.0f / float(phd::cell_decimetres), at_x = -1, at_y = -1;
     bool tilt_enabled = true;
     int pixel = 2;
     for (int i = 1; i < argc; ++i) {
@@ -182,7 +187,8 @@ int main(int argc, char** argv) {
         } else if (arg == "--size" && more && std::sscanf(argv[++i], "%dx%d", &width, &height) == 2) {
         } else if (arg == "--load" && more) {
             load = argv[++i];
-            save_path = load;
+        } else if (arg == "--shoreline-study") {
+            shoreline_study = true;
         } else if (arg == "--zoom" && more) {
             start_zoom = std::clamp(float(std::atof(argv[++i])), 1.0f, 256.0f);
         } else if (arg == "--at" && more && std::sscanf(argv[++i], "%f,%f", &at_x, &at_y) == 2) {
@@ -203,7 +209,7 @@ int main(int argc, char** argv) {
             quit_after_shot = true;
         } else {
             std::fprintf(stderr, "usage: %s [--seed N] [--size WxH] [--load FILE] [--shot FILE.png] "
-                                 "[--frames N --speed 0-3]\n", argv[0]);
+                                 "[--frames N --speed 0-3] [--shoreline-study]\n", argv[0]);
             return 2;
         }
     }
@@ -243,7 +249,8 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    for (long long t = 0; t < skip_ticks; ++t) {
+    const long long initial_ticks = skip_ticks.value_or(shoreline_study && load.empty() ? 120 : 0);
+    for (long long t = 0; t < initial_ticks; ++t) {
         world.step();
     }
     gfx::WorldView view;
@@ -251,7 +258,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    gfx::TiltView tilt(relief);
+    gfx::TiltView tilt(relief, shoreline_study);
     if (!tilt.init(world)) {
         return 1;
     }
@@ -266,10 +273,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     Camera camera;
+    camera.shoreline_study = shoreline_study;
+    if (shoreline_study && at_x < 0 && at_y < 0) {
+        at_x = 186;
+        at_y = 73;
+    }
     camera.cx = at_x >= 0 ? at_x : float(world.width()) / 2;
     camera.cy = at_y >= 0 ? at_y : float(world.height()) / 2;
     const auto max_zoom = [&] { return tilt_enabled ? 256.0f : 32.0f; };
-    camera.zoom = camera.target_zoom = std::min(start_zoom, max_zoom());
+    camera.zoom = camera.target_zoom = std::min(start_zoom.value_or(shoreline_study ? 64.0f : 2.0f), max_zoom());
     camera.focus_z = tilt.ground(camera.cx, camera.cy);
     const auto clamp_camera = [&] { camera.clamp(float(width), float(view_height), world.width(), world.height()); };
     clamp_camera();
@@ -279,13 +291,15 @@ int main(int argc, char** argv) {
     };
     tilt.place_test_scene(world, camera.cx, camera.cy);
 
-    int speed = start_speed;
+    int speed = start_speed.value_or(shoreline_study ? 0 : 1);
     long long tilt_frame = 0;
-    bool hud = true, running = true;
+    bool hud = !shoreline_study, running = true;
+    double study_animation = 1.0; // the pose in the reference frame
     double accumulator = 0, tick_ms = 0, frame_ms = 0, fps = 60, last_frame = now_seconds();
     double last_save = last_frame;
     std::string status;
     double status_until = 0;
+    const std::string save_path = load.empty() ? (shoreline_study ? "shoreline-study.phdw" : "petrihd.phdw") : load;
     const auto save = [&] {
         const bool ok = phd::write_file_atomic(save_path, world.save());
         status = ok ? "SAVED " + save_path : "SAVE FAILED";
@@ -487,7 +501,10 @@ int main(int argc, char** argv) {
             if (++tilt_frame % 15 == 0) {
                 tilt.refresh(world, 2);
             }
-            tilt.draw(world, art_camera, view.terrain(), font, art_w, art_h, art_h, frame_start);
+            if (shoreline_study && speed != 0) {
+                study_animation += dt;
+            }
+            tilt.draw(world, art_camera, view.terrain(), font, art_w, art_h, art_h, shoreline_study ? study_animation : frame_start);
         } else {
             batch.begin(art_w, art_h);
             view.draw(batch, font, world, art_camera, art_w, art_h, frame_start);

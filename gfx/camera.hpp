@@ -15,6 +15,7 @@ struct Camera {
     float zoom = 2;            // pixels per cell, as shown
     float target_zoom = 2;     // the power-of-two zoom it is moving to
     bool top_down = false;     // lock the pitch at straight down
+    bool shoreline_study = false; // show trunks and reeds in profile at habitat zoom
     float scale = 1;           // screen pixels per pixel of what is drawn: the pixel-art grid
 
     static constexpr float flat_limit = 32; // the last zoom that is always top-down
@@ -26,7 +27,7 @@ struct Camera {
             return 90;
         }
         const float level = std::log2(zoom / flat_limit); // 0 at 32, 1 at 64, 2 at 128, 3 at 256
-        const float keys[] = {90, 72, 56, 45};
+        const float keys[] = {90, shoreline_study ? 55.0f : 72.0f, shoreline_study ? 52.0f : 56.0f, 45};
         const int i = std::min(2, int(level));
         const float t = std::min(1.0f, level - float(i));
         return keys[i] + (keys[i + 1] - keys[i]) * t;

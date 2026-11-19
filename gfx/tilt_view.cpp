@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <string>
 
+#include "math.hpp"
+#include "shoreline_art.hpp"
 #include "terrain_art.hpp"
 
 namespace gfx {
@@ -32,6 +35,10 @@ uniform float u_zoom;
 uniform vec4 u_screen; // screen width, height, and the view's centre
 uniform float u_depth;
 varying vec2 v_uv;
+#ifdef SHORELINE_STUDY
+uniform vec3 u_bank_region; // origin in cells, width in cells
+varying vec2 v_bank;
+#endif
 varying vec4 v_color;
 uniform vec3 u_sun;
 uniform float u_lit; // 1: a_color carries the ground's normal; 0: a lit colour
@@ -41,6 +48,9 @@ void main() {
     float sy = u_screen.w + (p.y * u_trig.x - p.z * u_trig.y) * u_zoom;
     float d = -(p.y * u_trig.y + p.z * u_trig.x) * u_depth;
     v_uv = a_uv;
+#ifdef SHORELINE_STUDY
+    v_bank = (a_position.xy - u_bank_region.xy) / u_bank_region.z;
+#endif
     // The ground is lit from the slopes it really has, the same rule as the
     // flat bake uses, so near-flat ground matches the flat view.
     vec3 n = normalize(a_color.xyz * 2.0 - 1.0);
@@ -52,11 +62,22 @@ void main() {
 
 const char* fragment_source = R"(
 uniform sampler2D u_texture;
+#ifdef SHORELINE_STUDY
+uniform sampler2D u_bank;
+uniform float u_lit;
+varying vec2 v_bank;
+#endif
 uniform vec4 u_tint;
 varying vec2 v_uv;
 varying vec4 v_color;
 void main() {
-    gl_FragColor = texture2D(u_texture, v_uv) * v_color * u_tint;
+    vec4 surface = texture2D(u_texture, v_uv);
+#ifdef SHORELINE_STUDY
+    if (u_lit > 0.5 && all(greaterThanEqual(v_bank, vec2(0.0))) && all(lessThanEqual(v_bank, vec2(1.0)))) {
+        surface = texture2D(u_bank, v_bank);
+    }
+#endif
+    gl_FragColor = surface * v_color * u_tint;
 }
 )";
 
@@ -64,7 +85,11 @@ void main() {
 
 bool TiltView::init(const phd::World& world) {
     static const char* const attributes[] = {"a_position", "a_uv", "a_color"};
-    program_ = gl::program(vertex_source, fragment_source, attributes, 3);
+    if (shoreline_study_) {
+        bank_texture_ = shoreline::make_study_texture(world);
+    }
+    const std::string defines = bank_texture_.id ? "#define SHORELINE_STUDY\n" : "";
+    program_ = gl::program((defines + vertex_source).c_str(), (defines + fragment_source).c_str(), attributes, 3);
     if (!program_) {
         return false;
     }
@@ -77,6 +102,11 @@ bool TiltView::init(const phd::World& world) {
     u_texture_ = gl::GetUniformLocation(program_, "u_texture");
     u_sun_ = gl::GetUniformLocation(program_, "u_sun");
     u_lit_ = gl::GetUniformLocation(program_, "u_lit");
+    if (bank_texture_.id) {
+        gl::UseProgram(program_);
+        gl::Uniform1i(gl::GetUniformLocation(program_, "u_bank"), 1);
+        gl::Uniform3f(gl::GetUniformLocation(program_, "u_bank_region"), shoreline::left, shoreline::top, shoreline::extent);
+    }
     gl::GenBuffers(1, &scene_vbo_);
 
     width_ = world.width();
@@ -275,6 +305,114 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
         }
     };
 
+    // Small painted sprays on fixed, angled planes within a three-dimensional crown.
+    // Opaque runs leave windows between leaves, and share the scene depth buffer.
+    const auto leaf_spray = [&](V3 centre, float radius_x, float radius_y, Color pigment, unsigned seed,
+                                float outer_light, bool needles) {
+        // clang-format off
+        static constexpr char broad[][17] = {
+            "       33       ",
+            "    233443  33  ",
+            "   233443323433 ",
+            " 2234433222332  ",
+            " 1223332233322  ",
+            "112321224433221 ",
+            " 012122333222133",
+            "012222312212232 ",
+            " 0112332112221  ",
+            "  011211221121  ",
+            "   0011011  1   ",
+            "    01          ",
+        };
+        static constexpr char pine[][17] = {
+            "       3        ",
+            "      343       ",
+            "    23333       ",
+            "   13333232     ",
+            "     2232333    ",
+            "   2333232223   ",
+            "  233222332223  ",
+            "13212223332212  ",
+            " 11222231222122 ",
+            "  01121112211123",
+            " 011 1001101  1 ",
+            "  0   0    0    ",
+        };
+        // clang-format on
+        const auto byte = [](float x) { return std::uint8_t(std::clamp(x, 0.f, 255.f)); };
+
+        const Color tones[] = {
+            {byte(pigment.r * .29f + 8), byte(pigment.g * .35f + 12), byte(pigment.b * .44f + 13), 255},
+            {byte(pigment.r * .42f + 12), byte(pigment.g * .49f + 19), byte(pigment.b * .43f + 12), 255},
+            {byte((pigment.r * .60f + 24) * outer_light), byte((pigment.g * .70f + 23) * outer_light),
+             byte((pigment.b * .46f + 11) * outer_light), 255},
+            {byte((pigment.r * .88f + 37) * outer_light), byte((pigment.g * .86f + 39) * outer_light),
+             byte((pigment.b * .49f + 9) * outer_light), 255},
+            {byte((pigment.r * .92f + 63) * outer_light), byte((pigment.g * .88f + 55) * outer_light),
+             byte((pigment.b * .50f + 16) * outer_light), 255},
+        };
+        const float flip = (seed & 1) ? 1.f : -1.f;
+        const float tilt = (float(seed % 9) - 4.f) * 0.019f;
+        const auto pos = [&](int column, int row) {
+            float u = (float(column) / 8.f - 1.f) * flip, v = 1.f - float(row) / 6.f;
+            return centre + V3{u * radius_x + tilt * v * radius_y, -v * radius_y * .70f + u * radius_x * tilt,
+                               v * radius_y * .72f};
+        };
+        for (int row = 0; row < 12; ++row) {
+            const char* pixels = needles ? pine[row] : broad[row];
+            for (int x = 0; x < 16;) {
+                const int start = x++;
+                while (x < 16 && pixels[x] == pixels[start]) {
+                    ++x;
+                }
+                if (pixels[start] == ' ') {
+                    continue;
+                }
+                const Color tone = tones[pixels[start] - '0'];
+                const V3 a = pos(start, row), b = pos(x, row), c = pos(x, row + 1), d = pos(start, row + 1);
+                tri(a, b, c, tone);
+                tri(a, c, d, tone);
+            }
+        }
+    };
+    const auto painted_crown = [&](float x, float y, float ground_height, float height, float radius, Color leaf,
+                                   unsigned id, bool conifer, bool bare, float wx, float wy, bool shrub) {
+        const float phase = float(phd::hash3(int(id), 11, 813u) & 1023) * (6.2831853f / 1024.f);
+        const Color bark{112, 82, 57, 255};
+        const float width = shrub ? std::max(.024f, radius * .18f) : std::max(.075f, radius * .20f);
+        const V3 root{x, y, ground_height - .035f},
+            fork{x - radius * .08f, y + radius * .025f, ground_height + height * (shrub ? .21f : .33f)};
+        beam(root, fork, width, bark);
+        const int branch_count = shrub ? 5 : conifer ? 10 : 7;
+        const float reach = shrub ? std::min(.58f, radius + .16f * height) : radius;
+        for (int k = 0; k < branch_count; ++k) {
+            const auto shape_seed = phd::hash3(k, int(id), 7153u);
+            const float t = float(k) / float(branch_count - 1), a = phase + float(k) * 2.399963f;
+            const V3 side{std::cos(a), std::sin(a), 0};
+            const float canopy_z = shrub ? (.22f + t * .61f) : conifer ? (.35f + t * .57f) : (.51f + t * .37f);
+            const float branch_reach = reach * (conifer ? (.68f - t * .59f) : (.64f - .53f * t));
+            const float size = reach * (conifer ? (.70f - .38f * t) : (.56f + .09f * float(shape_seed & 255) / 255));
+            const V3 end{x + side.x * branch_reach + wx * canopy_z, y + side.y * branch_reach + wy * canopy_z,
+                         ground_height + height * canopy_z};
+            const V3 shoulder = fork + (end - fork) * .53f +
+                                V3{side.x * branch_reach * .17f, side.y * branch_reach * .17f, -height * .075f};
+            beam(fork, shoulder, width * (shrub ? .48f : .55f), bark);
+            beam(shoulder, end, width * (shrub ? .31f : .33f), bark);
+            if (bare) {
+                continue;
+            }
+            const float warm = (conifer ? .85f : .94f) + t * .12f;
+            const float lobe_height = shrub ? std::max(size * .81f, height * .19f)
+                                            : std::max(size * .74f, height * (conifer ? .095f : .083f));
+            leaf_spray(end, size, lobe_height, leaf, shape_seed, warm, conifer);
+            if (!shrub && size > .34f) {
+                const float angle = a + .85f;
+                const V3 offset{std::cos(angle) * size * .57f, std::sin(angle) * size * .57f, -lobe_height * .26f};
+                leaf_spray(end + offset, size * .64f, lobe_height * .70f, leaf, shape_seed >> 3, warm * .96f, conifer);
+            }
+        }
+    };
+
     // The trees the flat view draws as crowns, standing up: the same spots,
     // sizes and colours (art::tree_in), so the switch at 32 px per cell keeps
     // every tree where it was. Those whose tops can reach the view: tall ones
@@ -300,6 +438,13 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
                 const float sway = gust * (0.3f + 0.7f * rock) * h * 0.025f;
                 const float wx = std::cos(float(world.wind_angle()) * 6.2831853f / 256.0f) * sway;
                 const float wy = std::sin(float(world.wind_angle()) * 6.2831853f / 256.0f) * sway;
+                if (shoreline_study_) {
+                    if (!t.bare) {
+                        shadow(t.x - sun.x * r * .8f, t.y - sun.y * r * .8f, r * .86f);
+                    }
+                    painted_crown(t.x, t.y, g, h, r, leaves, t.id, t.conifer, t.bare, wx, wy, false);
+                    continue;
+                }
                 const auto at = [&](float f) { return f * f; }; // how far up the lean has built
                 if (!t.bare) {
                     shadow(t.x - sun.x * r * 0.9f, t.y - sun.y * r * 0.9f, r * 0.95f);
@@ -324,6 +469,87 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
                 }
             }
         }
+        // Each tuft grows from the position and height of a simulated soft plant.
+        if (shoreline_study_) {
+            const auto tuft = [&](const phd::Plant& p, int slot, int cx, int cy, int depth_dm) {
+                const float height = float(int(p.height) - depth_dm) / float(phd::cell_decimetres);
+                if (height < 0.07f) {
+                    return;
+                }
+                const auto hash = [&](int k) { return phd::hash3(k, int(p.id), 0x841d5a73u); };
+                const auto unit = [](std::uint32_t bits) { return float(bits & 255) / 255.f; };
+                const auto s = hash(0);
+                const float x = float(cx) + 0.25f + 0.5f * float(slot & 1) + (unit(s) - 0.5f) * 0.23f;
+                const float y = float(cy) + 0.25f + 0.5f * float(slot >> 1) + (unit(s >> 8) - 0.5f) * 0.23f;
+                const float heading = unit(s >> 16) * 6.2831853f;
+                const auto& genes = p.genome.gene;
+                const bool reed = genes[phd::gene_flood] > 155;
+                const bool dormant = p.flags & phd::plant_dormant;
+                const bool flowering = (p.flags & phd::plant_flowering) && !dormant;
+                const int hue = int(genes[phd::gene_leaf]) / 10;
+                const Color root = dormant ? Color{109, 91, 49, 255} : Color{55, 74, 40, 255};
+                const Color shade = dormant ? Color{142, 119, 65, 255} : Color{std::uint8_t(93 - hue), 117, 51, 255};
+                const Color green = dormant ? Color{178, 154, 91, 255} : Color{std::uint8_t(139 - hue), 158, 65, 255};
+                const Color sunlit = dormant ? Color{203, 186, 128, 255} : Color{std::uint8_t(180 - hue), 182, 77, 255};
+                const int count = (reed ? 8 : 7) + int(s >> 29);
+                const float span = std::min(reed ? 0.17f : 0.16f, height * (reed ? 0.22f : 0.40f));
+                const float bend = (reed ? 0.15f : 0.25f) * height;
+                for (int k = 0; k < count; ++k) {
+                    const auto a = hash(k + 1);
+                    const float angle = heading + float(k) * 2.3999632f;
+                    const V3 axis{std::cos(angle), std::sin(angle), 0};
+                    const float scale = 0.48f + 0.52f * unit(a >> 8);
+                    const float rad = (0.25f + 0.75f * unit(a)) * span;
+                    const float bx = x + axis.x * rad, by = y + axis.y * rad;
+                    const float g = ground(bx, by) - 0.014f;
+                    const V3 base{bx, by, g};
+                    const float h = height * scale;
+                    const float w = std::clamp(h * (reed ? 0.091f : 0.17f), 0.018f, 0.067f);
+                    const V3 half{(0.78f - axis.y * 0.22f) * w, axis.x * w * 0.55f, 0};
+                    const V3 lean{(0.4f + 0.78f * axis.x) * bend, (0.22f + axis.y) * bend, 0};
+                    const V3 mid = base + lean * 0.40f + V3{0, 0, h * 0.55f};
+                    const V3 tip = base + lean * (1.1f + unit(a >> 16)) + V3{0, 0, h};
+                    const Color side = (a & 2) ? shade : green;
+                    tri(base - half, base + half, mid - half, (a & 1) ? root : shade);
+                    tri(base + half, mid + half, mid - half, side);
+                    tri(mid - half, mid + half, tip, (a & 4) ? sunlit : green);
+                    if (reed && (k == 2 || k == 5) && h > 0.34f && !dormant) {
+                        const V3 head = mid + (tip - mid) * 0.69f;
+                        const V3 cap = tip + V3{0, 0, 0.028f};
+                        const V3 shoulder = head + (cap - head) * 0.36f;
+                        const V3 side{0.023f, 0, 0};
+                        tri(head, shoulder - side, shoulder + side, {102, 73, 37, 255});
+                        tri(shoulder - side, shoulder + side, cap, {140, 99, 46, 255});
+                    }
+                    if (flowering && !reed && k % 4 == 0 && h > 0.18f) {
+                        const Color petals[] = {{239, 234, 196, 255}, {236, 204, 92, 255}, {212, 148, 174, 255},
+                                                {163, 125, 187, 255}, {211, 104, 91, 255}, {152, 162, 210, 255}};
+                        const Color petals_here = petals[genes[phd::gene_flower] * 6 / 256];
+                        for (int j = 0; j < 4; ++j) {
+                            const float theta = angle + 1.57f * float(j);
+                            const V3 out{std::cos(theta) * 0.044f, std::sin(theta) * 0.044f, 0.016f};
+                            const V3 across{-out.y * 0.45f, out.x * 0.45f, 0};
+                            tri(tip, tip + out + across, tip + out - across, petals_here);
+                        }
+                    }
+                }
+            };
+            for (int cy = y0; cy <= y1; ++cy) {
+                for (int cx = x0; cx <= x1; ++cx) {
+                    const auto cell = std::size_t(cy) * width_ + cx;
+                    if (world.tree(cell)) {
+                        continue;
+                    }
+                    const int depth = world.water(cell) == phd::Water::none ? 0 : world.water_depth_dm(cell);
+                    for (int slot = 0; slot < 4; ++slot) {
+                        const auto* p = world.occupant(cell, slot);
+                        if (p && !phd::woody(p->genome)) {
+                            tuft(*p, slot, cx, cy, depth);
+                        }
+                    }
+                }
+            }
+        }
         // Shrubs: woody plants in a cell's quarters, as small domes.
         for (int cy = y0; cy <= y1; ++cy) {
             for (int cx = x0; cx <= x1; ++cx) {
@@ -342,6 +568,10 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
                     const bool bare = (p->flags & phd::plant_dormant) && !phd::evergreen(p->genome);
                     const Color c = bare ? Color{112, 96, 80, 255} : Color{std::uint8_t(60 + p->genome.gene[phd::gene_leaf] / 6),
                                                                           std::uint8_t(110 - p->genome.gene[phd::gene_leaf] / 12), 52, 255};
+                    if (shoreline_study_) {
+                        painted_crown(sx, sy, g, hh, rr, c, p->id, false, bare, 0, 0, true);
+                        continue;
+                    }
                     frustum(sx, sy, g - 0.02f, g + hh * 0.6f, rr * 0.7f, rr, 6, c);
                     frustum(sx, sy, g + hh * 0.6f, g + hh, rr, rr * 0.3f, 6, c);
                 }
@@ -372,9 +602,13 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
     // The test plant: a tree about two cells tall.
     const float tx = scene_x_, ty = scene_y_, tz = ground(tx, ty);
     shadow(tx - sun.x * 0.6f, ty - sun.y * 0.6f, 0.7f);
-    frustum(tx, ty, tz - 0.05f, tz + 1.0f, 0.10f, 0.06f, 6, {112, 80, 52, 255});
-    frustum(tx, ty, tz + 0.7f, tz + 1.3f, 0.45f, 0.75f, 7, {58, 118, 54, 255});
-    frustum(tx, ty, tz + 1.3f, tz + 2.3f, 0.75f, 0.0f, 7, {66, 132, 58, 255});
+    if (shoreline_study_) {
+        painted_crown(tx, ty, tz, 2.3f, .81f, {88, 139, 59, 255}, 7342u, false, false, 0, 0, false);
+    } else {
+        frustum(tx, ty, tz - 0.05f, tz + 1.0f, 0.10f, 0.06f, 6, {112, 80, 52, 255});
+        frustum(tx, ty, tz + 0.7f, tz + 1.3f, 0.45f, 0.75f, 7, {58, 118, 54, 255});
+        frustum(tx, ty, tz + 1.3f, tz + 2.3f, 0.75f, 0.0f, 7, {66, 132, 58, 255});
+    }
 
     // The test creature: three segments and six legs, walking a circle
     // beside the tree, each foot on the ground wherever it steps.
@@ -451,6 +685,10 @@ void TiltView::draw(const phd::World& world, const Camera& camera, const Texture
     const auto sun = art::sun_for(world);
     gl::Uniform3f(u_sun_, sun.x, sun.y, sun.z);
     gl::Uniform1f(u_lit_, 1);
+    if (bank_texture_.id) {
+        gl::ActiveTexture(gl::TEXTURE0 + 1);
+        gl::BindTexture(gl::TEXTURE_2D, bank_texture_.id);
+    }
     gl::ActiveTexture(gl::TEXTURE0);
     gl::BindTexture(gl::TEXTURE_2D, terrain.id);
     for (const auto& chunk : chunks_) {

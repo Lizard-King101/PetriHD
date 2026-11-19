@@ -37,7 +37,8 @@ add_test(NAME camera COMMAND petrihd_camera_tests)
 
 if(PETRIHD_GUI)
     find_package(SDL2 REQUIRED)
-    add_library(petrihd_gfx gfx/gl.cpp gfx/batch.cpp gfx/font.cpp gfx/world_view.cpp gfx/tilt_view.cpp gfx/pixel_target.cpp)
+    add_library(petrihd_gfx gfx/gl.cpp gfx/batch.cpp gfx/font.cpp gfx/world_view.cpp gfx/tilt_view.cpp gfx/pixel_target.cpp
+                            gfx/shoreline_art.cpp)
     target_include_directories(petrihd_gfx PUBLIC gfx ui)
     target_link_libraries(petrihd_gfx PUBLIC SDL2::SDL2 petrihd_art)
 

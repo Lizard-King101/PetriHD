@@ -36,6 +36,20 @@ ctest --test-dir build
   checks the fingerprints match x86. Needs `aarch64-linux-gnu-gcc` and
   `qemu-user`.
 
+## Shoreline art study
+
+Run `build/petrihd --shoreline-study` to explore the painted foliage, ground
+and shallows at the reference bank. This study opens seed 1 at tick 120,
+centered on cell (186, 73), at 64 pixels per cell with a 55° camera pitch.
+The detailed ground is baked at startup for a 24 × 24-cell patch around the
+bank. Drag to pan, and scroll or pinch to zoom. The study starts paused. Press Space
+to play and watch the foliage and test creature move.
+
+Add `--shot shoreline.png` to capture the reference frame and exit. The
+capture hides the budget HUD and uses a fixed animation phase.
+
+![Shoreline study with layered crowns, reeds and a creature at the water’s edge](docs/images/shoreline_study.png)
+
 ## Layout
 
 - `core/`: the simulation. Deterministic, integer, no dependencies.

@@ -27,7 +27,8 @@ public:
 
     // Display height: cells of height per metre of elevation. True scale is
     // one cell per 1.5 m.
-    explicit TiltView(float cells_per_metre = 10.0f / float(phd::cell_decimetres)) : relief_(cells_per_metre) {}
+    explicit TiltView(float cells_per_metre = 10.0f / float(phd::cell_decimetres), bool shoreline_study = false)
+        : relief_(cells_per_metre), shoreline_study_(shoreline_study) {}
 
     bool init(const phd::World& world);
     void refresh(const phd::World& world, int chunks); // re-height this many chunks
@@ -59,6 +60,8 @@ private:
                      int view_h);
 
     float relief_;
+    bool shoreline_study_;
+    Texture bank_texture_;
     int width_ = 0, height_ = 0;
     std::vector<float> corners_; // (width + 1) x (height + 1) display heights
     std::vector<Chunk> chunks_;
