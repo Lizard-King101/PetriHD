@@ -34,39 +34,38 @@ const Rgb substrate_colors[int(phd::Substrate::count)] = {
     {150, 140, 122}, // gravel
 };
 
-// What grows on each biome: how much of the ground the low plants cover and
-// their colour, and how many trees stand per cell, with their canopy colour.
-// Until milestone 2 gives plants of their own, the biome stands in for them.
-struct Cover {
-    float ground;     // 0..1 of the ground hidden by grass, moss or shrubs
-    Rgb plants;
-    float trees;      // chance of a tree rooted in a cell
-    Rgb canopy;
-    float crown;      // crown radius, in cells
-};
+// A plant's colour now: its leaf gene from yellow-green to blue-green, then
+// the season: autumn colour and bare winter branches for deciduous plants,
+// straw for dormant grass, browning when it is failing.
+Rgb leaf_rgb(const phd::Plant& p, const phd::World& world) {
+    const auto& g = p.genome.gene;
+    const float leaf = float(g[phd::gene_leaf]) / 255.0f;
+    Rgb c = leaf < 0.5f ? mix({152, 170, 66}, {74, 140, 56}, leaf * 2) : mix({74, 140, 56}, {46, 104, 84}, leaf * 2 - 1);
+    if (phd::woody(p.genome)) {
+        c = scale(c, 0.8f);
+    }
+    const int t = world.temperature(std::size_t(p.cell));
+    if (!phd::evergreen(p.genome)) {
+        if (p.flags & phd::plant_dormant) {
+            c = phd::woody(p.genome) ? Rgb{112, 98, 86} : Rgb{176, 158, 104};
+        } else if (world.season() == 2 && t < 150) {
+            // Autumn: yellow, orange or red by the plant's flower gene.
+            const Rgb turn = g[phd::gene_flower] < 85 ? Rgb{222, 182, 62} : g[phd::gene_flower] < 170 ? Rgb{212, 118, 42}
+                                                                                                     : Rgb{172, 52, 40};
+            c = mix(c, turn, std::min(1.0f, float(150 - t) / 90.0f));
+        }
+    }
+    if (p.health < 140) {
+        c = mix(c, {150, 118, 70}, float(140 - p.health) / 200.0f);
+    }
+    return c;
+}
 
-const Cover covers[phd::biome_count] = {
-    {0.0f, {0, 0, 0}, 0, {0, 0, 0}, 0},                              // ice
-    {0.55f, {132, 136, 96}, 0.01f, {70, 92, 66}, 0.5f},              // tundra
-    {0.7f, {78, 104, 66}, 0.6f, {40, 74, 54}, 0.7f},                 // taiga
-    {0.8f, {122, 152, 90}, 0.0f, {0, 0, 0}, 0},                      // alpine meadow
-    {0.08f, {120, 128, 96}, 0.0f, {0, 0, 0}, 0},                     // bare rock
-    {0.85f, {92, 136, 62}, 0.55f, {62, 118, 50}, 1.0f},              // deciduous forest
-    {0.95f, {120, 162, 72}, 0.03f, {70, 124, 54}, 0.9f},             // grassland
-    {0.8f, {124, 98, 104}, 0.02f, {72, 98, 60}, 0.6f},               // heath
-    {0.5f, {132, 130, 80}, 0.05f, {96, 110, 60}, 0.6f},              // scrubland
-    {0.95f, {58, 118, 50}, 0.7f, {30, 96, 42}, 1.1f},                // rainforest
-    {0.7f, {178, 162, 88}, 0.06f, {96, 116, 54}, 1.1f},              // savanna
-    {0.55f, {150, 146, 82}, 0.28f, {104, 118, 58}, 0.85f},           // dry woodland
-    {0.05f, {150, 140, 90}, 0.0f, {0, 0, 0}, 0},                     // desert
-    {0.0f, {0, 0, 0}, 0, {0, 0, 0}, 0},                              // salt flat
-    {0.85f, {102, 142, 82}, 0.02f, {60, 98, 60}, 0.7f},              // marsh
-    {0.8f, {74, 108, 62}, 0.4f, {50, 86, 56}, 0.95f},                // swamp
-    {0.7f, {70, 110, 70}, 0.45f, {48, 96, 66}, 0.9f},                // mangrove
-    {0.9f, {112, 122, 72}, 0.03f, {62, 86, 60}, 0.5f},               // bog
-    {0.9f, {88, 142, 64}, 0.12f, {58, 116, 52}, 1.0f},               // riverbank
-    {0.06f, {150, 160, 100}, 0.0f, {0, 0, 0}, 0},                    // beach
-};
+Rgb flower_rgb(const phd::Plant& p) {
+    static const Rgb colours[6] = {{240, 240, 232}, {240, 210, 60}, {236, 150, 180}, {150, 100, 200}, {210, 60, 60},
+                                   {110, 140, 230}};
+    return colours[p.genome.gene[phd::gene_flower] * 6 / 256];
+}
 
 // Bilinear sample of a per-cell value at a point in cell units (centres at +0.5).
 template <class F> float sample(const phd::World& world, float x, float y, F value) {
@@ -109,25 +108,24 @@ Tree tree_in(const phd::World& world, int cx, int cy) {
     if (cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height()) {
         return tree;
     }
-    const auto i = std::size_t(cy) * world.width() + cx;
-    const auto biome = world.biome(i);
-    if (world.water(i) != phd::Water::none || int(biome) >= int(phd::Biome::tidal_shallows) ||
-        world.substrate(i) == phd::Substrate::rock) {
+    const phd::Plant* p = world.tree(std::size_t(cy) * world.width() + cx);
+    if (!p) {
         return tree;
     }
-    const auto& cover = covers[int(biome)];
-    const auto h = phd::hash3(cx, cy, 0x7f4a7c15u);
-    if (float(h & 1023) >= cover.trees * 1024.0f) {
-        return tree;
-    }
-    tree.x = float(cx) + 0.15f + float(h >> 10 & 255) / 255.0f * 0.7f;
-    tree.y = float(cy) + 0.15f + float(h >> 18 & 255) / 255.0f * 0.7f;
-    tree.radius = cover.crown * (0.7f + float(h >> 26 & 63) / 63.0f * 0.6f);
-    const Rgb canopy = scale(cover.canopy, 0.9f + float(h >> 4 & 31) / 31.0f * 0.2f);
-    tree.r = std::uint8_t(std::min(255.0f, canopy.r));
-    tree.g = std::uint8_t(std::min(255.0f, canopy.g));
-    tree.b = std::uint8_t(std::min(255.0f, canopy.b));
-    tree.conifer = biome == phd::Biome::taiga || biome == phd::Biome::tundra;
+    // Where in its cell the trunk stands, from the plant itself, so it
+    // stays put as the camera moves and as the tree grows.
+    const auto h = phd::hash3(int(p->id), int(p->id >> 16), 0x7f4a7c15u);
+    tree.x = float(cx) + 0.3f + float(h & 255) / 255.0f * 0.4f;
+    tree.y = float(cy) + 0.3f + float(h >> 8 & 255) / 255.0f * 0.4f;
+    tree.radius = float(phd::crown16(p->height)) / 16.0f;
+    tree.height = float(p->height) / float(phd::cell_decimetres);
+    const Rgb c = leaf_rgb(*p, world);
+    tree.r = std::uint8_t(std::min(255.0f, c.r));
+    tree.g = std::uint8_t(std::min(255.0f, c.g));
+    tree.b = std::uint8_t(std::min(255.0f, c.b));
+    tree.conifer = phd::evergreen(p->genome) && p->genome.gene[phd::gene_cold] >= 150;
+    tree.bare = !phd::evergreen(p->genome) && (p->flags & phd::plant_dormant);
+    tree.id = p->id;
     return tree;
 }
 
@@ -247,26 +245,25 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                 const float wet = sample(world, x, y, soil);
                 c = scale(c, 1.0f - std::max(0.0f, wet - 90) / 255.0f * 0.35f);
 
-                // Low plants, in patches: wavy biome edges, and gaps where the
-                // ground shows, more of them where the cover is thin.
-                const float jx = float(phd::value_noise(tx, ty, 6, 0x51ed270bu) - 32768) / 32768.0f * 0.7f;
-                const float jy = float(phd::value_noise(tx, ty, 6, 0x2545f491u) - 32768) / 32768.0f * 0.7f;
-                const int bx = std::clamp(int(x + jx), 0, cw - 1), by = std::clamp(int(y + jy), 0, ch - 1);
-                auto biome = world.biome(std::size_t(by) * cw + bx);
-                if (int(biome) >= int(phd::Biome::tidal_shallows)) {
-                    biome = phd::Biome::beach; // water biomes on dry texels are shore
+                // Low plants: each of the cell's four slots is a quarter of it,
+                // 2 x 2 texels, covered as fully as the plant is tall, in its
+                // own colour, with flowers in spring.
+                const int slot = (tx % texels_per_cell >= texels_per_cell / 2) + 2 * (ty % texels_per_cell >= texels_per_cell / 2);
+                const phd::Plant* low = world.tree(cell) ? nullptr : world.occupant(cell, slot);
+                if (low) {
+                    const float clumps = float(phd::value_noise(tx, ty, 3, 0x1b873593u)) / 65535.0f;
+                    const float cover = std::min(1.0f, 0.35f + float(low->height) / 8.0f);
+                    if (clumps < cover) {
+                        Rgb green = scale(leaf_rgb(*low, world), 0.92f + float(noise >> 4 & 15) / 15.0f * 0.16f);
+                        if (phd::woody(low->genome)) {
+                            green = scale(green, (noise >> 9 & 3) == 0 ? 0.75f : 1.0f); // shrubs: darker clumps
+                        }
+                        c = green;
+                        if ((low->flags & phd::plant_flowering) && (noise >> 12 & 7) == 0) {
+                            c = flower_rgb(*low);
+                        }
+                    }
                 }
-                const auto& cover = covers[int(biome)];
-                const float clumps = float(phd::value_noise(tx, ty, 3, 0x1b873593u)) / 65535.0f;
-                float plants = clumps < cover.ground ? 1.0f : 0.0f;
-                if (wet < 40) {
-                    plants *= 0.6f; // drought thins and yellows the cover
-                }
-                Rgb green = scale(cover.plants, 0.92f + float(noise >> 4 & 15) / 15.0f * 0.16f);
-                if (wet < 50) {
-                    green = mix(green, {186, 170, 104}, (50 - wet) / 50.0f * 0.6f);
-                }
-                c = mix(c, green, plants);
 
                 // Trees: round crowns rooted in nearby cells, lit like domes,
                 // with the southern ones in front; their shadows fall away
@@ -294,6 +291,9 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                     const float dz = std::sqrt(std::max(0.0f, 1 - dx * dx - dy * dy));
                     const float lit = dx * sun.x + dy * sun.y + dz * sun.z;
                     c = scale(Rgb{float(top->r), float(top->g), float(top->b)}, 0.62f + 0.5f * std::max(0.0f, lit) + grain * 2);
+                    if (top->bare && (noise >> 6 & 3) != 0) {
+                        c = scale(c, 0.7f); // bare branches: the ground shows through
+                    }
                     if ((noise >> 8 & 7) == 0) {
                         c = scale(c, 0.85f); // leaf clumps
                     }
@@ -307,6 +307,11 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                     if (float(noise >> 8 & 255) / 255.0f < lying * 1.3f) {
                         c = mix(c, {238, 242, 248}, std::min(1.0f, lying + (top ? 0.0f : 0.3f)));
                     }
+                }
+                // Burnt ground: char and ash, fading as it recovers.
+                if (const int burnt = world.burnt(cell)) {
+                    const float b = float(burnt) / 255.0f;
+                    c = mix(c, (noise >> 14 & 7) == 0 ? Rgb{150, 146, 140} : Rgb{44, 38, 34}, b * (top ? 0.4f : 0.85f));
                 }
                 // Hill shading: slopes facing the sun are lit, the others shaded.
                 if (hill_shade && !top) {

@@ -11,6 +11,8 @@ namespace {
 
 constexpr std::uint32_t purpose_weather = 1;
 constexpr std::uint32_t purpose_soil = 2;
+constexpr std::uint32_t purpose_plants = 3;
+constexpr std::uint32_t purpose_fire = 4;
 
 // Rows of the environment update in turn: soil every 4 ticks, biomes every 16.
 constexpr int soil_stagger = 4;
@@ -23,7 +25,7 @@ constexpr std::uint32_t river_min_flow = 3000;
 constexpr int lake_start_level = 700;
 
 constexpr char save_magic[4] = {'P', 'H', 'D', 'W'};
-constexpr std::uint32_t save_version = 3;
+constexpr std::uint32_t save_version = 4;
 
 // Little-endian serialisation of integers and arrays of them.
 struct Writer {
@@ -76,7 +78,9 @@ World::World(const WorldConfig& config)
     : config_(config),
       nodes_x_((config.width + node - 1) / node),
       nodes_y_((config.height + node - 1) / node),
-      weather_rng_(stream_seed(config.seed, purpose_weather)) {
+      weather_rng_(stream_seed(config.seed, purpose_weather)),
+      plant_rng_(stream_seed(config.seed, purpose_plants)),
+      fire_rng_(stream_seed(config.seed, purpose_fire)) {
     terrain_.generate(config.seed, config.width, config.height, config.ocean_percent);
     const auto n = cells();
     water_.assign(n, 0);
@@ -93,6 +97,18 @@ World::World(const WorldConfig& config)
     lakes_.assign(terrain_.basins.size(), LakeState{lake_start_level, 0});
     lake_area_.assign(lakes_.size(), 0);
     fronts_.reserve(max_fronts);
+    plants_.assign(max_plants, Plant{});
+    free_.resize(max_plants);
+    for (int k = 0; k < max_plants; ++k) {
+        free_[std::size_t(k)] = std::uint32_t(max_plants - 1 - k); // index 0 comes out first
+    }
+    occupancy_.assign(n * 4, 0);
+    canopy_height_.assign(n, 0);
+    canopy_cover_.assign(n, 0);
+    litter_.assign(n, 0);
+    fire_.assign(n, 0);
+    fire_next_.assign(n, 0);
+    burnt_.assign(n, 0);
     rain_.assign(std::size_t(nodes_x_) * nodes_y_, 0);
     cloud_.assign(rain_.size(), 0);
 
@@ -116,6 +132,7 @@ World::World(const WorldConfig& config)
     for (int pass = 0; pass < 12; ++pass) {
         update_hydrology();
     }
+    seed_plants();
     for (int y = 0; y < config.height; ++y) {
         update_biomes(y);
     }
@@ -158,6 +175,10 @@ void World::step() {
     }
     if (tick_ % hydrology_every == 0) {
         update_hydrology();
+    }
+    update_plants();
+    if (tick_ % 2 == 0) {
+        update_fire();
     }
 }
 
@@ -251,6 +272,11 @@ void World::update_fronts() {
             const int ly = cy + int(weather_rng_.below(std::uint32_t(r + 1))) - r / 2;
             lightning_[lightning_next_] = {tick_, static_cast<std::int16_t>(std::clamp(lx, 0, w - 1)),
                                            static_cast<std::int16_t>(std::clamp(ly, 0, h - 1))};
+            // Dry ground with something to burn catches.
+            const auto struck = std::size_t(std::clamp(ly, 0, h - 1)) * w + std::size_t(std::clamp(lx, 0, w - 1));
+            if (soil_[struck] < 110) {
+                ignite(struck);
+            }
             lightning_next_ = (lightning_next_ + 1) % lightning_kept;
         }
     }
@@ -325,6 +351,16 @@ void World::update_soil(int y) {
         snow_[i] = static_cast<std::uint8_t>(snow);
         auto& moisture = moisture_[i];
         moisture = static_cast<std::uint16_t>(int(moisture) + ((soil << 8) - int(moisture)) / 512);
+        // Litter rots into nutrients, faster when warm and damp; rock slowly
+        // weathers into a little more.
+        if (litter_[i] && t > 0) {
+            const int rot = std::min<int>(litter_[i], 1 + litter_[i] * std::min(t, 250) * soil / (250 * 255 * 16));
+            litter_[i] = static_cast<std::uint16_t>(litter_[i] - rot);
+            nutrients_[i] = static_cast<std::uint8_t>(std::min(255, nutrients_[i] + (rot + 3) / 4));
+        }
+        if (nutrients_[i] < 60 && hash3(x, y, salt + 1) % 64 == 0) {
+            ++nutrients_[i];
+        }
     }
 }
 
@@ -504,34 +540,49 @@ Biome World::classify(int x, int y) const {
     if (m >= 120 && (next_to(Water::river) || next_to(Water::lake))) {
         return Biome::riverbank;
     }
-    if (dm > 380 && t < 150 && m < 150) {
+    // What grows decides the rest: closed canopy is forest, open crowns
+    // woodland or savanna, low cover grassland, heath or tundra, and little
+    // or nothing scrub or desert. The climate says which kind.
+    const int canopy = canopy_cover_[i];
+    int low = 0;
+    for (int s = 0; s < 4; ++s) {
+        const Plant* p = occupant(i, s);
+        low += p && p->slot != whole_cell;
+    }
+    if (dm > 380 && canopy < 120 && t < 150) {
         return Biome::alpine_meadow; // the windswept tops of the hills
     }
-    if (t < 0) {
-        return Biome::tundra;
-    }
-    if (t < 60) {
-        return m >= 90 ? Biome::taiga : Biome::tundra;
-    }
-    if (t < 190) {
-        if (m < 50 || ground == Substrate::gravel) {
-            return Biome::scrubland;
+    if (canopy >= 140) {
+        if (t < 60) {
+            return Biome::taiga;
         }
-        if (m < 85) {
-            return t < 120 || ground == Substrate::sand ? Biome::heath : Biome::grassland;
+        if (t < 190) {
+            return Biome::deciduous_forest;
         }
-        return m < 130 ? Biome::grassland : Biome::deciduous_forest;
+        return m >= 150 ? Biome::rainforest : Biome::dry_woodland;
     }
-    if (m < 35) {
-        return ground == Substrate::clay || terrain_.filled[i] > dm ? Biome::salt_flat : Biome::desert;
+    if (canopy >= 50) {
+        if (t < 60) {
+            return Biome::taiga;
+        }
+        return t < 190 ? Biome::grassland : Biome::savanna;
     }
-    if (m < 60) {
-        return Biome::desert;
-    }
-    if (m < 100) {
+    if (low >= 2) {
+        if (t < 60) {
+            return Biome::tundra;
+        }
+        if (t < 190) {
+            return ground == Substrate::sand || ground == Substrate::peat || t < 110 ? Biome::heath : Biome::grassland;
+        }
         return Biome::savanna;
     }
-    return m < 150 ? Biome::dry_woodland : Biome::rainforest;
+    if (t < 60) {
+        return Biome::tundra;
+    }
+    if (t >= 190 && m < 60) {
+        return ground == Substrate::clay || terrain_.filled[i] > dm ? Biome::salt_flat : Biome::desert;
+    }
+    return Biome::scrubland;
 }
 
 std::uint64_t World::fingerprint() const {
@@ -580,6 +631,31 @@ std::uint64_t World::fingerprint() const {
     all(runoff_);
     all(flow_);
     all(biome_);
+    hash.add(plant_rng_.state());
+    hash.add(fire_rng_.state());
+    hash.add(next_plant_id_);
+    for (const auto& p : plants_) {
+        if (!p.id) {
+            continue;
+        }
+        hash.add(p.id);
+        hash.add(p.lineage);
+        hash.add(p.cell);
+        hash.add(p.slot);
+        hash.add(p.health);
+        hash.add(p.flags);
+        hash.add(p.seeds);
+        hash.add(p.height);
+        hash.add(p.age);
+        hash.add(p.energy);
+        hash.bytes(p.genome.gene, gene_count);
+    }
+    all(free_);
+    all(litter_);
+    all(fire_);
+    all(burnt_);
+    all(canopy_height_);
+    all(canopy_cover_);
     return hash.value();
 }
 
@@ -591,7 +667,9 @@ std::size_t World::memory_bytes() const {
            bytes(terrain_.aspect) + bytes(terrain_.slope) + bytes(water_) + bytes(depth_) +
            bytes(temperature_) + bytes(soil_) + bytes(moisture_) + bytes(snow_) + bytes(nutrients_) +
            bytes(runoff_) + bytes(flow_) + bytes(biome_) + bytes(lakes_) + fronts_.capacity() * sizeof(Front) +
-           bytes(rain_) + bytes(cloud_) + bytes(accumulated_);
+           bytes(rain_) + bytes(cloud_) + bytes(accumulated_) + bytes(plants_) + bytes(free_) + bytes(occupancy_) +
+           bytes(canopy_height_) + bytes(canopy_cover_) + bytes(litter_) + bytes(fire_) + bytes(fire_next_) + bytes(burnt_) +
+           bytes(previous_water_) + bytes(lake_area_);
 }
 
 // Layout, little-endian: magic, version, the config, the clock and weather,
@@ -643,6 +721,35 @@ std::vector<std::uint8_t> World::save() const {
     w.array(runoff_);
     w.array(flow_);
     w.array(biome_);
+    w.put(plant_rng_.state());
+    w.put(fire_rng_.state());
+    w.put(next_plant_id_);
+    w.put(std::uint32_t(free_.size()));
+    w.array(free_);
+    for (const auto& p : plants_) {
+        if (!p.id) {
+            continue;
+        }
+        w.put(std::uint32_t(&p - plants_.data()));
+        w.put(p.id);
+        w.put(p.lineage);
+        w.put(p.cell);
+        w.put(p.slot);
+        w.put(p.health);
+        w.put(p.flags);
+        w.put(p.seeds);
+        w.put(p.height);
+        w.put(p.age);
+        w.put(p.energy);
+        for (const auto v : p.genome.gene) {
+            w.put(v);
+        }
+    }
+    w.array(litter_);
+    w.array(fire_);
+    w.array(burnt_);
+    w.array(canopy_height_);
+    w.array(canopy_cover_);
     w.put(checksum(w.out.data(), w.out.size()));
     return std::move(w.out);
 }
@@ -712,6 +819,51 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
     r.array(world.runoff_);
     r.array(world.flow_);
     r.array(world.biome_);
+    world.plant_rng_.set_state(r.get<std::uint32_t>());
+    world.fire_rng_.set_state(r.get<std::uint32_t>());
+    world.next_plant_id_ = r.get<std::uint32_t>();
+    const auto free_count = r.get<std::uint32_t>();
+    if (free_count > std::uint32_t(max_plants)) {
+        return false;
+    }
+    world.free_.resize(free_count);
+    r.array(world.free_);
+    std::fill(world.plants_.begin(), world.plants_.end(), Plant{});
+    std::fill(world.occupancy_.begin(), world.occupancy_.end(), 0);
+    for (std::uint32_t k = 0; k < std::uint32_t(max_plants) - free_count && r.ok; ++k) {
+        const auto index = r.get<std::uint32_t>();
+        if (index >= std::uint32_t(max_plants)) {
+            return false;
+        }
+        Plant& p = world.plants_[index];
+        p.id = r.get<std::uint32_t>();
+        p.lineage = r.get<std::uint32_t>();
+        p.cell = r.get<std::int32_t>();
+        p.slot = r.get<std::uint8_t>();
+        p.health = r.get<std::uint8_t>();
+        p.flags = r.get<std::uint8_t>();
+        p.seeds = r.get<std::uint8_t>();
+        p.height = r.get<std::uint16_t>();
+        p.age = r.get<std::uint16_t>();
+        p.energy = r.get<std::int32_t>();
+        for (auto& v : p.genome.gene) {
+            v = r.get<std::uint8_t>();
+        }
+        if (p.cell < 0 || std::size_t(p.cell) >= world.cells() || p.slot > whole_cell) {
+            return false;
+        }
+        const auto base = std::size_t(p.cell) * 4;
+        for (int s = 0; s < 4; ++s) {
+            if (p.slot == whole_cell || p.slot == s) {
+                world.occupancy_[base + std::size_t(s)] = index + 1;
+            }
+        }
+    }
+    r.array(world.litter_);
+    r.array(world.fire_);
+    r.array(world.burnt_);
+    r.array(world.canopy_height_);
+    r.array(world.canopy_cover_);
     if (!r.ok || r.at != r.end) {
         return false;
     }

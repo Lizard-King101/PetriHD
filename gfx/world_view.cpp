@@ -151,6 +151,38 @@ void WorldView::draw(Batch& batch, const Font& font, const phd::World& world, co
     }
     batch.quad(fog_, sx(0), sy(0), sx(node_w), sy(node_h), 0, 0, 1, 1, {220, 226, 230, 255});
 
+    // Fire: flickering flames over burning cells, smoke drifting downwind.
+    {
+        const int x0 = std::max(0, int(left)), y0 = std::max(0, int(top));
+        const int x1 = std::min(world.width() - 1, int(left + float(view_w) / zoom) + 1);
+        const int y1 = std::min(world.height() - 1, int(top + float(view_h) / zoom) + 1);
+        const auto flicker = std::uint32_t(time * 12);
+        for (int cy = y0; cy <= y1; ++cy) {
+            for (int cx = x0; cx <= x1; ++cx) {
+                const int f = world.fire(std::size_t(cy) * world.width() + cx);
+                if (!f) {
+                    continue;
+                }
+                const float bx = sx(float(cx)), by = sy(float(cy));
+                const float size = std::max(1.0f, zoom * 0.35f);
+                for (int k = 0; k < 3; ++k) {
+                    const auto h = phd::hash3(cx * 3 + k, cy, flicker);
+                    const float px = bx + float(h & 255) / 255.0f * zoom, py = by + float(h >> 8 & 255) / 255.0f * zoom;
+                    font.rect(batch, px, py, px + size, py + size,
+                              k == 0 ? gfx::Color{255, 226, 96, 240} : gfx::Color{238, 112, 36, 220});
+                }
+                const auto h = phd::hash3(cx, cy, flicker / 4);
+                const float drift = float(h & 15) * zoom * 0.15f;
+                const float smoke = std::max(2.0f, zoom * 0.8f);
+                font.rect(batch, bx + float(phd::icos(world.wind_angle())) / 1024.0f * drift,
+                          by + float(phd::isin(world.wind_angle())) / 1024.0f * drift - zoom * 0.5f,
+                          bx + float(phd::icos(world.wind_angle())) / 1024.0f * drift + smoke,
+                          by + float(phd::isin(world.wind_angle())) / 1024.0f * drift - zoom * 0.5f + smoke,
+                          {70, 66, 64, 70});
+            }
+        }
+    }
+
     // Rain and snow, in screen space over the nodes where it falls.
     const float node_px = phd::World::node * zoom;
     const int n0x = std::max(0, int(std::max(0.0f, left)) / phd::World::node);

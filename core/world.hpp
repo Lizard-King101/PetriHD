@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "biome.hpp"
+#include "plants.hpp"
 #include "random.hpp"
 #include "terrain.hpp"
 
@@ -55,6 +56,8 @@ public:
     static constexpr int node = 8; // cells per weather node
     static constexpr int max_fronts = 6;
     static constexpr int lightning_kept = 16;
+    static constexpr int max_plants = 262144;
+    static constexpr int plant_stagger = 16; // each plant grows every 16 ticks
 
     explicit World(const WorldConfig& config);
 
@@ -103,6 +106,26 @@ public:
     const std::array<Lightning, lightning_kept>& lightning() const { return lightning_; }
     const std::vector<LakeState>& lakes() const { return lakes_; }
 
+    // Plants. A cell's slots 0-3 are its quarters; a tree fills all four.
+    const Plant* occupant(std::size_t cell, int slot) const {
+        const auto at = occupancy_[cell * 4 + std::size_t(slot)];
+        return at ? &plants_[at - 1] : nullptr;
+    }
+    // The tree filling a cell, or null.
+    const Plant* tree(std::size_t cell) const {
+        const Plant* p = occupant(cell, 0);
+        return p && p->slot == whole_cell ? p : nullptr;
+    }
+    const std::vector<Plant>& plant_pool() const { return plants_; }
+    std::size_t plant_count() const { return plants_.size() - free_.size(); }
+    int canopy_height(std::size_t i) const { return canopy_height_[i]; } // dm, of the crowns over a cell
+    int canopy_cover(std::size_t i) const { return canopy_cover_[i]; }   // 0..255
+    int litter(std::size_t i) const { return litter_[i]; }
+    int fire(std::size_t i) const { return fire_[i]; }   // burning: intensity; 0 not
+    int burnt(std::size_t i) const { return burnt_[i]; } // 255 just burnt, fading
+    // Sets a cell alight if there is anything to burn; for lightning and tests.
+    bool ignite(std::size_t i);
+
     // A cell's temperature over the year, without season or day: the valley's
     // climate, a little colder up high and in hollows, warmer on slopes
     // facing the sun. What the biome follows.
@@ -122,6 +145,19 @@ private:
     void update_hydrology();
     void refresh_water();
     Biome classify(int x, int y) const;
+
+    // Plants (plants.cpp).
+    void seed_plants();
+    void update_plants();
+    void grow_plant(std::uint32_t index);
+    void reproduce(std::uint32_t index);
+    bool establish(const PlantGenome& genome, std::uint32_t lineage, int cell, bool clone);
+    std::int32_t place(const PlantGenome& genome, std::uint32_t lineage, int cell, int slot, int height);
+    void kill_plant(std::uint32_t index);
+    void update_canopy();
+    void update_fire();
+    int fuel(std::size_t i) const;
+    bool room_for_tree(int cell) const;
 
     WorldConfig config_;
     Terrain terrain_;
@@ -150,6 +186,18 @@ private:
     std::vector<std::uint32_t> accumulated_;
     std::vector<std::uint32_t> lake_area_;
     std::vector<std::uint8_t> previous_water_;
+
+    std::vector<Plant> plants_;              // the pool
+    std::vector<std::uint32_t> free_;        // free pool entries, last out first
+    std::vector<std::uint32_t> occupancy_;   // per cell, 4 slots: pool index + 1, or 0
+    std::vector<std::uint16_t> canopy_height_;
+    std::vector<std::uint8_t> canopy_cover_;
+    std::vector<std::uint16_t> litter_;      // dead plant matter: fuel, then nutrients
+    std::vector<std::uint8_t> fire_;
+    std::vector<std::uint8_t> fire_next_;    // scratch
+    std::vector<std::uint8_t> burnt_;
+    Random plant_rng_, fire_rng_;
+    std::uint32_t next_plant_id_ = 1;
 };
 
 } // namespace phd

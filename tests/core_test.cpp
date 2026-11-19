@@ -144,6 +144,50 @@ void test_land_and_water() {
     CHECK(darkest == 0 && brightest > 200);
 }
 
+void test_plants_and_fire() {
+    phd::WorldConfig config;
+    config.seed = 6;
+    phd::World world(config);
+    const auto start = world.plant_count();
+    CHECK(start > 50000);
+    // Every occupied slot points at a live plant in that cell, and trees fill
+    // all four.
+    for (std::size_t c = 0; c < world.cells(); ++c) {
+        for (int s = 0; s < 4; ++s) {
+            if (const phd::Plant* p = world.occupant(c, s)) {
+                CHECK(p->id != 0 && std::size_t(p->cell) == c);
+                CHECK(p->slot == s || p->slot == phd::whole_cell);
+            }
+        }
+    }
+    // Through two years the valley stays green.
+    for (int t = 0; t < 2 * phd::World::ticks_per_year; ++t) {
+        world.step();
+    }
+    CHECK(world.plant_count() > start / 3);
+    std::size_t trees = 0;
+    for (const auto& p : world.plant_pool()) {
+        trees += p.id && p.slot == phd::whole_cell;
+    }
+    CHECK(trees > 1000);
+
+    // A fire set in the driest grassy cell burns it and its plants.
+    std::size_t target = 0;
+    int driest = 256;
+    for (std::size_t c = 0; c < world.cells(); ++c) {
+        if (world.water(c) == phd::Water::none && world.occupant(c, 0) && !world.tree(c) && world.soil_water(c) < driest) {
+            driest = world.soil_water(c);
+            target = c;
+        }
+    }
+    CHECK(world.ignite(target));
+    for (int t = 0; t < 40; ++t) {
+        world.step();
+    }
+    CHECK(world.burnt(target) > 0);
+    CHECK(world.occupant(target, 0) == nullptr || world.occupant(target, 0)->age < 40);
+}
+
 void test_save_round_trip() {
     auto world = run(5, 300);
     const auto saved = world.save();
@@ -185,7 +229,7 @@ void test_files() {
 // The fingerprint after 2,400 ticks on seed 1. It must match on every
 // platform and build (x86, aarch64, NEON or not). If a change to the world is
 // meant to change it, update it in the same commit and say why.
-constexpr std::uint64_t golden_seed1_t2400 = 0x9b6a1de6f3726c1aull;
+constexpr std::uint64_t golden_seed1_t2400 = 0x6d5dc4b7a824c293ull;
 
 void test_golden() {
     const auto value = run(1, 2400).fingerprint();
@@ -200,6 +244,7 @@ int main() {
     test_fnv_known_values();
     test_determinism();
     test_land_and_water();
+    test_plants_and_fire();
     test_save_round_trip();
     test_files();
     test_golden();

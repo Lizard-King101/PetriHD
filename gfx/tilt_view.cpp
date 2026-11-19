@@ -244,20 +244,26 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
         quad(c[0], c[3], c[7], c[4], color, side * -1.0f);
         quad(c[1], c[5], c[6], c[2], color, side);
     };
-    // A frustum of `sides` faces around a vertical axis.
-    const auto frustum = [&](float x, float y, float z0, float z1, float r0, float r1, int sides, Color color) {
+    // A frustum of `sides` faces around an axis from (x, y, z0) up to
+    // (x + lean_x, y + lean_y, z1): the lean is how trees sway.
+    const auto leaning = [&](float x, float y, float z0, float z1, float r0, float r1, int sides, Color color,
+                             float lean_x, float lean_y) {
+        const float ux = x + lean_x, uy = y + lean_y;
         for (int k = 0; k < sides; ++k) {
             const float a0 = float(k) * 6.2831853f / float(sides), a1 = float(k + 1) * 6.2831853f / float(sides);
             const V3 b0{x + std::cos(a0) * r0, y + std::sin(a0) * r0, z0}, b1{x + std::cos(a1) * r0, y + std::sin(a1) * r0, z0};
-            const V3 t0{x + std::cos(a0) * r1, y + std::sin(a0) * r1, z1}, t1{x + std::cos(a1) * r1, y + std::sin(a1) * r1, z1};
+            const V3 t0{ux + std::cos(a0) * r1, uy + std::sin(a0) * r1, z1}, t1{ux + std::cos(a1) * r1, uy + std::sin(a1) * r1, z1};
             const float mid = (a0 + a1) / 2;
             const V3 out{std::cos(mid) * (z1 - z0), std::sin(mid) * (z1 - z0), r0 - r1};
             quad(b0, b1, t1, t0, color, out);
             if (r1 > 0) {
-                tri({x, y, z1}, t0, t1, lit(color, {0, 0, 1}));
+                tri({ux, uy, z1}, t0, t1, lit(color, {0, 0, 1}));
             }
             tri({x, y, z0}, b1, b0, lit(color, {0, 0, -1}));
         }
+    };
+    const auto frustum = [&](float x, float y, float z0, float z1, float r0, float r1, int sides, Color color) {
+        leaning(x, y, z0, z1, r0, r1, sides, color, 0, 0);
     };
     const auto shadow = [&](float x, float y, float radius) {
         const Color dark{10, 14, 10, 90};
@@ -285,17 +291,76 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
                     continue;
                 }
                 ++trees_;
-                const float g = ground(t.x, t.y), r = t.radius, h = 1.2f + r * 2.6f;
+                const float g = ground(t.x, t.y), r = t.radius, h = std::max(1.2f, t.height);
                 const Color leaves{t.r, t.g, t.b, 255}, bark{96, 72, 50, 255};
-                shadow(t.x - sun.x * r * 0.9f, t.y - sun.y * r * 0.9f, r * 0.95f);
-                frustum(t.x, t.y, g - 0.05f, g + h * 0.45f, 0.08f + 0.06f * r, 0.05f + 0.03f * r, 5, bark);
-                if (t.conifer) {
-                    frustum(t.x, t.y, g + h * 0.2f, g + h * 0.62f, r, r * 0.45f, 7, leaves);
-                    frustum(t.x, t.y, g + h * 0.5f, g + h, r * 0.7f, 0.0f, 7, leaves);
+                // Sway: the crown leans with the wind and rocks, more for tall
+                // trees and strong wind, each tree on its own beat.
+                const float gust = float(world.wind_speed()) / 96.0f;
+                const float rock = std::sin(float(time) * 1.7f + float(t.id % 97)) * 0.5f + 0.5f;
+                const float sway = gust * (0.3f + 0.7f * rock) * h * 0.025f;
+                const float wx = std::cos(float(world.wind_angle()) * 6.2831853f / 256.0f) * sway;
+                const float wy = std::sin(float(world.wind_angle()) * 6.2831853f / 256.0f) * sway;
+                const auto at = [&](float f) { return f * f; }; // how far up the lean has built
+                if (!t.bare) {
+                    shadow(t.x - sun.x * r * 0.9f, t.y - sun.y * r * 0.9f, r * 0.95f);
+                }
+                leaning(t.x, t.y, g - 0.05f, g + h * 0.45f, 0.08f + 0.05f * r, 0.05f + 0.03f * r, 5, bark, wx * at(0.45f),
+                        wy * at(0.45f));
+                const auto layer = [&](float f0, float f1, float r0, float r1, Color colour) {
+                    leaning(t.x + wx * at(f0), t.y + wy * at(f0), g + h * f0, g + h * f1, r0, r1, 7, colour,
+                            wx * (at(f1) - at(f0)), wy * (at(f1) - at(f0)));
+                };
+                if (t.bare) {
+                    // Winter: a thin, open crown of grey branches.
+                    layer(0.4f, 0.75f, r * 0.15f, r * 0.55f, Color{104, 92, 82, 255});
+                    layer(0.75f, 1.0f, r * 0.55f, r * 0.1f, Color{104, 92, 82, 255});
+                } else if (t.conifer) {
+                    layer(0.2f, 0.62f, r, r * 0.45f, leaves);
+                    layer(0.5f, 1.0f, r * 0.7f, 0.0f, leaves);
                 } else {
-                    frustum(t.x, t.y, g + h * 0.35f, g + h * 0.6f, r * 0.55f, r, 7, leaves);
-                    frustum(t.x, t.y, g + h * 0.6f, g + h * 0.85f, r, r * 0.8f, 7, leaves);
-                    frustum(t.x, t.y, g + h * 0.85f, g + h, r * 0.8f, r * 0.25f, 7, leaves);
+                    layer(0.35f, 0.6f, r * 0.55f, r, leaves);
+                    layer(0.6f, 0.85f, r, r * 0.8f, leaves);
+                    layer(0.85f, 1.0f, r * 0.8f, r * 0.25f, leaves);
+                }
+            }
+        }
+        // Shrubs: woody plants in a cell's quarters, as small domes.
+        for (int cy = y0; cy <= y1; ++cy) {
+            for (int cx = x0; cx <= x1; ++cx) {
+                const auto i = std::size_t(cy) * width_ + cx;
+                if (world.tree(i)) {
+                    continue;
+                }
+                for (int slot = 0; slot < 4; ++slot) {
+                    const phd::Plant* p = world.occupant(i, slot);
+                    if (!p || !phd::woody(p->genome) || p->height < 4) {
+                        continue;
+                    }
+                    const float sx = float(cx) + 0.25f + 0.5f * float(slot & 1), sy = float(cy) + 0.25f + 0.5f * float(slot >> 1);
+                    const float hh = float(p->height) / float(phd::cell_decimetres), rr = std::min(0.3f, 0.1f + hh * 0.2f);
+                    const float g = ground(sx, sy);
+                    const bool bare = (p->flags & phd::plant_dormant) && !phd::evergreen(p->genome);
+                    const Color c = bare ? Color{112, 96, 80, 255} : Color{std::uint8_t(60 + p->genome.gene[phd::gene_leaf] / 6),
+                                                                          std::uint8_t(110 - p->genome.gene[phd::gene_leaf] / 12), 52, 255};
+                    frustum(sx, sy, g - 0.02f, g + hh * 0.6f, rr * 0.7f, rr, 6, c);
+                    frustum(sx, sy, g + hh * 0.6f, g + hh, rr, rr * 0.3f, 6, c);
+                }
+            }
+        }
+        // Fire: flickering flames over burning cells.
+        for (int cy = y0; cy <= y1; ++cy) {
+            for (int cx = x0; cx <= x1; ++cx) {
+                const int f = world.fire(std::size_t(cy) * width_ + cx);
+                if (!f) {
+                    continue;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const auto hsh = phd::hash3(cx * 3 + k, cy, std::uint32_t(time * 10));
+                    const float fx = float(cx) + 0.2f + float(hsh & 255) / 255.0f * 0.6f;
+                    const float fy = float(cy) + 0.2f + float(hsh >> 8 & 255) / 255.0f * 0.6f;
+                    const float fh = (0.4f + float(hsh >> 16 & 255) / 255.0f * 0.8f) * float(f) / 8.0f;
+                    const float g = ground(fx, fy);
+                    frustum(fx, fy, g, g + fh, 0.18f, 0.0f, 5, k == 0 ? Color{255, 220, 90, 255} : Color{240, 120, 40, 255});
                 }
             }
         }
