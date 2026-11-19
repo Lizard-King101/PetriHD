@@ -4,32 +4,34 @@
 #include <vector>
 
 #include "batch.hpp"
+#include "camera.hpp"
 #include "font.hpp"
 #include "terrain_art.hpp"
 #include "world.hpp"
 
 namespace gfx {
 
-struct Camera {
-    float x = 0, y = 0;    // world cell at the view's top left
-    float zoom = 2;        // pixels per cell, as shown
-    float target_zoom = 2; // the integer zoom it is moving to
-};
-
 // Draws the world: the terrain texture (baked a few chunks at a time, so the
 // sun, snow and water keep moving without a frame ever paying for all of
-// it), then cloud shadows, fog, rain and snow, and lightning.
+// it), then cloud shadows, fog, rain and snow, and lightning. This is the
+// flat path, used up to 32 px per cell; the tilted path draws the same
+// terrain texture over a heightfield (tilt_view.hpp).
 class WorldView {
 public:
-    static constexpr int chunk_cells = 32;
+    // Small enough that one chunk's bake (about 0.4 ms on the PC, perhaps
+    // 3-4 ms on the Pi) never takes a frame by itself.
+    static constexpr int chunk_cells = 16;
 
     bool init(const phd::World& world);
     // Bakes chunks for up to `budget` seconds, those on screen first.
-    void refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, double budget);
+    // Tilted, the terrain is baked without hill shading, since the tilted
+    // view lights its own slopes; switching rebakes what is on screen at once.
+    void refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, double budget, bool tilted);
     void bake_everything(const phd::World& world);
     void draw(Batch& batch, const Font& font, const phd::World& world, const Camera& camera, int view_w, int view_h,
               double time);
 
+    const Texture& terrain() const { return terrain_; }
     double bake_ms() const { return bake_ms_; }
     int chunks_per_frame() const { return chunks_last_; }
 
@@ -37,9 +39,12 @@ private:
     void bake_chunk(const phd::World& world, const art::Sun& sun, int chunk);
     void update_sky(const phd::World& world);
 
-    Texture terrain_, clouds_, fog_;
+    // The terrain at 4 texels per cell, and averaged down to 2 and 1, so the
+    // zoomed-out view samples one texel per pixel and small things don't blink.
+    Texture terrain_, terrain_half_, terrain_quarter_, clouds_, fog_;
     int chunks_x_ = 0, chunks_y_ = 0, next_ = 0;
-    std::vector<std::uint8_t> chunk_rgb_, cloud_rgba_, fog_rgba_;
+    bool shaded_ = true;
+    std::vector<std::uint8_t> chunk_rgb_, half_rgb_, quarter_rgb_, cloud_rgba_, fog_rgba_;
     std::vector<int> visible_;
     double bake_ms_ = 0;
     int chunks_last_ = 0;

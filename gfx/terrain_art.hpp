@@ -20,8 +20,25 @@ struct Sun {
 Sun sun_for(const phd::World& world);
 
 // Bakes the texels [tx0, tx0 + w) x [ty0, ty0 + h) into rgb (3 bytes each),
-// rows `stride` bytes apart.
-void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride);
+// rows `stride` bytes apart. `flat` is the top-down look; the tilted view
+// bakes without it: no hill shading (it lights its own slopes) and no tree
+// crowns (it stands real trees in their places), with forest floor where the
+// crowns were.
+void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
+          bool flat = true);
+
+// A tree rooted in a cell, from the cell's biome and a hash of the cell, so it
+// stays put however the camera moves. Both views draw the same trees.
+struct Tree {
+    float x = 0, y = 0, radius = 0; // crown centre and radius, in cells; radius 0 for none
+    std::uint8_t r = 0, g = 0, b = 0; // canopy colour
+    bool conifer = false;
+};
+Tree tree_in(const phd::World& world, int cx, int cy);
+
+// Hill shading uses the land's true slopes: metres of rise over the 1.5 m
+// width of a cell. The tilted view lights by the same rule.
+constexpr float shade_metres = float(phd::cell_decimetres) / 10.0f;
 
 // The whole world, for screenshots.
 void bake_all(const phd::World& world, std::vector<std::uint8_t>& rgb, int& width, int& height);

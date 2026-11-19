@@ -4,8 +4,13 @@
 //   petrihd [--seed N] [--size WxH] [--load FILE] [--shot FILE.png]
 //           [--ticks N]                (run N ticks before showing)
 //           [--frames N --speed 0-3]   (run N frames, print timings, quit)
+//           [--zoom Z] [--at X,Y]      (start zoom, 1-256, and focus cell)
+//           [--flat] [--relief K]      (no tilted view; display cells per metre)
+//           [--pixel N]                (screen pixels per art pixel, default 2)
 //
 // Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
+// T locks the camera top-down, G turns the tilted view off and on, O puts
+// the test tree and creature at the focus.
 // Long-press or right-click a cell to inspect it.
 
 #include <SDL.h>
@@ -26,8 +31,10 @@
 #include "font.hpp"
 #include "gl.hpp"
 #include "png.hpp"
+#include "pixel_target.hpp"
 #include "pointer.hpp"
 #include "world.hpp"
+#include "tilt_view.hpp"
 #include "world_view.hpp"
 
 namespace {
@@ -89,6 +96,11 @@ constexpr float panel_width = 260;
 constexpr double long_press_seconds = 0.45;
 constexpr double bake_budget_seconds = 0.003;
 
+const char* substrate_name(phd::Substrate s) {
+    static const char* names[] = {"LOAM", "SAND", "CLAY", "PEAT", "ROCK", "GRAVEL"};
+    return names[int(s)];
+}
+
 const char* water_name(phd::Water kind) {
     switch (kind) {
     case phd::Water::ocean: return "SEA";
@@ -144,6 +156,9 @@ int main(int argc, char** argv) {
     bool quit_after_shot = false;
     int bench_frames = 0, start_speed = 1;
     long long skip_ticks = 0;
+    float start_zoom = 2, relief = 10.0f / float(phd::cell_decimetres), at_x = -1, at_y = -1;
+    bool tilt_enabled = true;
+    int pixel = 2;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const bool more = i + 1 < argc;
@@ -153,6 +168,15 @@ int main(int argc, char** argv) {
         } else if (arg == "--load" && more) {
             load = argv[++i];
             save_path = load;
+        } else if (arg == "--zoom" && more) {
+            start_zoom = std::clamp(float(std::atof(argv[++i])), 1.0f, 256.0f);
+        } else if (arg == "--at" && more && std::sscanf(argv[++i], "%f,%f", &at_x, &at_y) == 2) {
+        } else if (arg == "--pixel" && more) {
+            pixel = std::clamp(std::atoi(argv[++i]), 1, 8);
+        } else if (arg == "--flat") {
+            tilt_enabled = false;
+        } else if (arg == "--relief" && more) {
+            relief = float(std::atof(argv[++i]));
         } else if (arg == "--ticks" && more) {
             skip_ticks = std::atoll(argv[++i]);
         } else if (arg == "--frames" && more) {
@@ -176,6 +200,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return 1;
     }
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0); // the world draws into its own target, which has one
     SDL_Window* window = nullptr;
     SDL_GLContext context = create_context(window, width, height);
     if (!context) {
@@ -211,26 +236,36 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    gfx::TiltView tilt(relief);
+    if (!tilt.init(world)) {
+        return 1;
+    }
+
     const int view_height = height - bar_height;
+    // The world is drawn at 1/pixel of the window's size (its logical size,
+    // so a scaled desktop and the Pi's panel give the same pixel grid), then
+    // scaled up by whole pixels.
+    const int art_w = width / pixel, art_h = (view_height + pixel - 1) / pixel;
+    gfx::PixelTarget target;
+    if (!target.init(art_w, art_h)) {
+        return 1;
+    }
     Camera camera;
-    const auto clamp_camera = [&] {
-        const float visible_w = float(width) / camera.zoom, visible_h = float(view_height) / camera.zoom;
-        const auto axis = [](float& at, float visible, int size) {
-            at = visible >= float(size) ? (float(size) - visible) / 2 : std::clamp(at, 0.0f, float(size) - visible);
-        };
-        axis(camera.x, visible_w, world.width());
-        axis(camera.y, visible_h, world.height());
-    };
+    camera.cx = at_x >= 0 ? at_x : float(world.width()) / 2;
+    camera.cy = at_y >= 0 ? at_y : float(world.height()) / 2;
+    const auto max_zoom = [&] { return tilt_enabled ? 256.0f : 32.0f; };
+    camera.zoom = camera.target_zoom = std::min(start_zoom, max_zoom());
+    camera.focus_z = tilt.ground(camera.cx, camera.cy);
+    const auto clamp_camera = [&] { camera.clamp(float(width), float(view_height), world.width(), world.height()); };
     clamp_camera();
     const auto zoom_at = [&](float zoom, float sx, float sy) {
-        const float wx = camera.x + sx / camera.zoom, wy = camera.y + sy / camera.zoom;
-        camera.zoom = zoom;
-        camera.x = wx - sx / camera.zoom;
-        camera.y = wy - sy / camera.zoom;
+        camera.zoom_about(zoom, sx, sy, float(width), float(view_height));
         clamp_camera();
     };
+    tilt.place_test_scene(world, camera.cx, camera.cy);
 
     int speed = start_speed;
+    long long tilt_frame = 0;
     bool hud = true, running = true;
     double accumulator = 0, tick_ms = 0, frame_ms = 0, fps = 60, last_frame = now_seconds();
     double last_save = last_frame;
@@ -250,10 +285,15 @@ int main(int argc, char** argv) {
     float press_x = 0, press_y = 0;
     bool press_moved = false, press_fired = false;
     const auto cell_at = [&](float px, float py) {
-        const int cx = int(std::floor(camera.x + px / camera.zoom)), cy = int(std::floor(camera.y + py / camera.zoom));
+        float gx, gy;
+        camera.to_ground(px, py, float(width), float(view_height), gx, gy);
+        const int cx = int(std::floor(gx)), cy = int(std::floor(gy));
         return cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height() ? -1 : cy * world.width() + cx;
     };
     std::vector<double> frame_samples;
+    // Where zooming is centred: the pointer that last scrolled or pinched.
+    float zoom_anchor_x = float(width) / 2, zoom_anchor_y = float(view_height) / 2;
+    float pinch_zoom = 0;
     float pinch_start = 0;
     bool dragging = false;
     float drag_x = 0, drag_y = 0;
@@ -264,13 +304,17 @@ int main(int argc, char** argv) {
 
     while (running) {
         const double frame_start = now_seconds();
+        int window_w = width, window_h = height;
+        SDL_GetWindowSize(window, &window_w, &window_h);
+        const float input_x = float(width) / float(std::max(1, window_w));
+        const float input_y = float(height) / float(std::max(1, window_h));
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = false;
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_RIGHT &&
-                       event.button.y < view_height) {
-                inspected = cell_at(float(event.button.x), float(event.button.y));
+                       float(event.button.y) * input_y < float(view_height)) {
+                inspected = cell_at(float(event.button.x) * input_x, float(event.button.y) * input_y);
             } else if (event.type == SDL_KEYDOWN) {
                 switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE: running = false; break;
@@ -280,14 +324,26 @@ int main(int argc, char** argv) {
                 case SDLK_3: speed = 2; break;
                 case SDLK_4: speed = 3; break;
                 case SDLK_h: hud = !hud; break;
+                case SDLK_t: camera.top_down = !camera.top_down; break;
+                case SDLK_g:
+                    tilt_enabled = !tilt_enabled;
+                    camera.target_zoom = std::min(camera.target_zoom, max_zoom());
+                    break;
+                case SDLK_o: tilt.place_test_scene(world, camera.cx, camera.cy); break;
                 case SDLK_s: save(); break;
                 case SDLK_F12: shot = format("petrihd-%" PRIu64 ".png", world.tick()); break;
                 default: break;
                 }
             }
-            const auto p = ui::pointer_from(event, width, height);
+            const auto p = ui::pointer_from(event, width, height, input_x, input_y);
             if (p.type == ui::Pointer::wheel && p.y < view_height) {
-                camera.target_zoom = std::clamp(p.scroll > 0 ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, 32.0f);
+                // Proportional to how far the wheel turned: a notch is about
+                // x1.4, so two notches double the zoom. Smooth-scrolling wheels
+                // and touchpads send fractions of a notch.
+                const float notches = std::clamp(p.scroll, -3.0f, 3.0f);
+                camera.target_zoom = std::clamp(camera.target_zoom * std::pow(2.0f, notches * 0.5f), 1.0f, max_zoom());
+                zoom_anchor_x = p.x;
+                zoom_anchor_y = p.y;
             } else if (p.type == ui::Pointer::down) {
                 if (p.y >= view_height) {
                     for (int i = 0; i < 4; ++i) {
@@ -315,6 +371,7 @@ int main(int argc, char** argv) {
                 if (held.size() == 2) {
                     const auto a = held.begin()->second, b = std::next(held.begin())->second;
                     pinch_start = std::hypot(a.x - b.x, a.y - b.y);
+                    pinch_zoom = camera.target_zoom;
                 }
             } else if (p.type == ui::Pointer::move && held.count(p.id)) {
                 held[p.id] = p;
@@ -322,19 +379,18 @@ int main(int argc, char** argv) {
                     press_moved = true;
                 }
                 if (held.size() == 1 && dragging) {
-                    camera.x -= (p.x - drag_x) / camera.zoom;
-                    camera.y -= (p.y - drag_y) / camera.zoom;
+                    camera.cx -= (p.x - drag_x) / camera.zoom;
+                    camera.cy -= (p.y - drag_y) / (camera.zoom * camera.sin_pitch());
                     drag_x = p.x;
                     drag_y = p.y;
                     clamp_camera();
                 } else if (held.size() == 2 && pinch_start > 0) {
                     const auto a = held.begin()->second, b = std::next(held.begin())->second;
+                    // The zoom follows the fingers' spread, about their midpoint.
                     const float distance = std::hypot(a.x - b.x, a.y - b.y);
-                    if (distance > pinch_start * 1.5f || distance < pinch_start / 1.5f) {
-                        const bool in = distance > pinch_start;
-                        camera.target_zoom = std::clamp(in ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, 32.0f);
-                        pinch_start = distance;
-                    }
+                    camera.target_zoom = std::clamp(pinch_zoom * distance / pinch_start, 1.0f, max_zoom());
+                    zoom_anchor_x = (a.x + b.x) / 2;
+                    zoom_anchor_y = (a.y + b.y) / 2;
                 }
             } else if (p.type == ui::Pointer::up) {
                 if (held.size() == 1 && held.count(p.id) && !press_moved && !press_fired) {
@@ -357,21 +413,26 @@ int main(int argc, char** argv) {
             press_fired = true;
         }
 
-        // Smooth zoom toward the integer target, about the view's center or
-        // the pointer.
+        // Smooth zoom toward the target, about the pointer that asked for it.
         if (camera.zoom != camera.target_zoom) {
-            float sx = float(width) / 2, sy = float(view_height) / 2;
-            int mx = 0, my = 0;
-            SDL_GetMouseState(&mx, &my);
-            if (my < view_height) {
-                sx = float(mx);
-                sy = float(my);
-            }
+            const float sx = zoom_anchor_x, sy = std::min(zoom_anchor_y, float(view_height));
             float next = camera.zoom * std::pow(camera.target_zoom / camera.zoom, 0.25f);
-            if (std::fabs(next - camera.target_zoom) < 0.02f) {
+            if (std::fabs(next / camera.target_zoom - 1) < 0.002f) {
                 next = camera.target_zoom;
             }
             zoom_at(next, sx, sy);
+        }
+
+        // Tilting turns about the ground at the focus, not sea level. When the
+        // pivot's height follows the ground, it slides along the line of sight
+        // too, so the picture doesn't move: panning over hills then tracks the
+        // finger in every direction.
+        {
+            const float rise = (tilt.ground(camera.cx, camera.cy) - camera.focus_z) * 0.2f;
+            camera.focus_z += rise;
+            if (camera.sin_pitch() > 0.01f) {
+                camera.cy += rise * camera.cos_pitch() / camera.sin_pitch();
+            }
         }
 
         // Simulation.
@@ -396,7 +457,7 @@ int main(int argc, char** argv) {
             const double ms = (now_seconds() - sim_start) * 1000.0 / done;
             tick_ms = tick_ms == 0 ? ms : tick_ms * 0.9 + ms * 0.1;
         }
-        view.refresh(world, camera, width, view_height, bake_budget_seconds);
+        view.refresh(world, camera, width, view_height, bake_budget_seconds, tilt_enabled && camera.tilted());
         if (frame_start - last_save > autosave_seconds) {
             save();
         }
@@ -404,20 +465,40 @@ int main(int argc, char** argv) {
         // Drawing.
         int drawable_w = width, drawable_h = height;
         SDL_GL_GetDrawableSize(window, &drawable_w, &drawable_h);
-        gl::Viewport(0, 0, drawable_w, drawable_h);
+        const bool tilted = tilt_enabled && camera.tilted();
+        const Camera art_camera = camera.for_target(float(pixel));
+        target.begin();
+        if (tilted) {
+            if (++tilt_frame % 15 == 0) {
+                tilt.refresh(world, 2);
+            }
+            tilt.draw(world, art_camera, view.terrain(), font, art_w, art_h, art_h, frame_start);
+        } else {
+            batch.begin(art_w, art_h);
+            view.draw(batch, font, world, art_camera, art_w, art_h, frame_start);
+            batch.end();
+        }
+        const int world_draws = batch.draw_calls() + (tilted ? tilt.draw_calls() : 0);
+        target.end(drawable_w, drawable_h);
         gl::ClearColor(0.04f, 0.05f, 0.05f, 1);
         gl::Clear(gl::COLOR_BUFFER_BIT);
         batch.begin(width, height);
-        view.draw(batch, font, world, camera, width, view_height, frame_start);
+        // The framebuffer's rows run bottom to top.
+        batch.quad(target.texture(), 0, 0, float(art_w * pixel), float(art_h * pixel), 0, 1, 1, 0, white);
         if (inspected >= 0) {
-            const float cx = (float(inspected % world.width()) - camera.x) * camera.zoom;
-            const float cy = (float(inspected / world.width()) - camera.y) * camera.zoom;
-            const float z = std::max(camera.zoom, 3.0f);
+            // Outline the cell, projected through the camera at its ground height.
+            const float x = float(inspected % world.width()), y = float(inspected / world.width());
             const gfx::Color mark{255, 240, 120, 230};
-            font.rect(batch, cx - 1, cy - 1, cx + z + 1, cy, mark);
-            font.rect(batch, cx - 1, cy + z, cx + z + 1, cy + z + 1, mark);
-            font.rect(batch, cx - 1, cy, cx, cy + z, mark);
-            font.rect(batch, cx + z, cy, cx + z + 1, cy + z, mark);
+            float px[4], py[4];
+            const float corner_x[4] = {x, x + 1, x + 1, x}, corner_y[4] = {y, y, y + 1, y + 1};
+            for (int k = 0; k < 4; ++k) {
+                const float z = tilted ? tilt.ground(corner_x[k], corner_y[k]) : camera.focus_z;
+                camera.to_screen(corner_x[k], corner_y[k], z, float(width), float(view_height), px[k], py[k]);
+            }
+            font.rect(batch, px[0] - 1, std::min(py[0], py[1]) - 1, px[1] + 1, std::min(py[0], py[1]) + 1, mark);
+            font.rect(batch, px[3] - 1, std::max(py[2], py[3]) - 1, px[2] + 1, std::max(py[2], py[3]) + 1, mark);
+            font.rect(batch, px[0] - 1, py[0], px[0] + 1, py[3], mark);
+            font.rect(batch, px[1] - 1, py[1], px[1] + 1, py[2], mark);
         }
 
         // The cell inspector.
@@ -428,7 +509,7 @@ int main(int argc, char** argv) {
             const std::string lines[] = {
                 phd::biome_name(world.biome(i)),
                 format("CELL %d, %d", inspected % world.width(), inspected / world.width()),
-                format("HEIGHT %d M", world.elevation(i)),
+                format("HEIGHT %.1f M  %s", world.elevation(i) / 10.0, substrate_name(world.substrate(i))),
                 format("WATER %s %.1f M", water_name(world.water(i)), world.water_depth_dm(i) / 10.0),
                 format("TEMP %s%d.%d C", t < 0 ? "-" : "", std::abs(t) / 10, std::abs(t) % 10),
                 format("SOIL WATER %d", world.soil_water(i)),
@@ -466,12 +547,15 @@ int main(int argc, char** argv) {
             const double pi_ms = tick_ms * pi_factor;
             const std::string lines[] = {
                 format("TICK %.3f MS  PI~%.2f/%.0f MS", tick_ms, pi_ms, pi_tick_budget_ms),
-                format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f", frame_ms, fps, camera.target_zoom),
-                format("DRAWS %d  QUADS %d  BAKE %.2f MS", batch.draw_calls(), batch.quads(), view.bake_ms()),
+                format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f  PITCH %.0f%s", frame_ms, fps, camera.zoom,
+                       camera.pitch(), camera.top_down ? " LOCK" : tilt_enabled ? "" : " FLAT"),
+                format("DRAWS %d  TRIS %d  BAKE %.2f MS  %dX%d Z%d", world_draws + batch.draw_calls(),
+                       tilted ? tilt.triangles() : 0, view.bake_ms(), art_w, art_h, target.depth_bits()),
                 format("SIM %.2f MB  RSS %.1f MB", world.memory_bytes() / 1048576.0, resident_bytes() / 1048576.0),
-                format("FRONTS %zu  WIND %d  %s", world.fronts().size(), world.wind_speed(), gl::is_es() ? "GLES" : "GL"),
+                format("FRONTS %zu  WIND %d  TREES %d  %s", world.fronts().size(), world.wind_speed(),
+                       tilted ? tilt.trees() : 0, gl::is_es() ? "GLES" : "GL"),
             };
-            font.rect(batch, 4, 4, 4 + 6 * 2 * 40 + 8, 4 + 5 * 18 + 6, panel);
+            font.rect(batch, 4, 4, 4 + 6 * 2 * 44 + 8, 4 + 5 * 18 + 6, panel);
             for (int i = 0; i < 5; ++i) {
                 font.text(batch, 10, 10 + float(i) * 18, lines[i], 2, i == 0 && pi_ms > pi_tick_budget_ms ? warn : white);
             }
