@@ -68,36 +68,6 @@ const Cover covers[phd::biome_count] = {
     {0.06f, {150, 160, 100}, 0.0f, {0, 0, 0}, 0},                    // beach
 };
 
-// A tree rooted in a cell, from the cell's biome and a hash of the cell, so
-// it stays put however the camera moves.
-struct Tree {
-    float x = 0, y = 0, radius = 0;
-    Rgb canopy{0, 0, 0};
-};
-
-Tree tree_in(const phd::World& world, int cx, int cy) {
-    Tree tree;
-    if (cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height()) {
-        return tree;
-    }
-    const auto i = std::size_t(cy) * world.width() + cx;
-    const auto biome = world.biome(i);
-    if (world.water(i) != phd::Water::none || int(biome) >= int(phd::Biome::tidal_shallows) ||
-        world.substrate(i) == phd::Substrate::rock) {
-        return tree;
-    }
-    const auto& cover = covers[int(biome)];
-    const auto h = phd::hash3(cx, cy, 0x7f4a7c15u);
-    if (float(h & 1023) >= cover.trees * 1024.0f) {
-        return tree;
-    }
-    tree.x = float(cx) + 0.15f + float(h >> 10 & 255) / 255.0f * 0.7f;
-    tree.y = float(cy) + 0.15f + float(h >> 18 & 255) / 255.0f * 0.7f;
-    tree.radius = cover.crown * (0.7f + float(h >> 26 & 63) / 63.0f * 0.6f);
-    tree.canopy = scale(cover.canopy, 0.9f + float(h >> 4 & 31) / 31.0f * 0.2f);
-    return tree;
-}
-
 // Bilinear sample of a per-cell value at a point in cell units (centres at +0.5).
 template <class F> float sample(const phd::World& world, float x, float y, F value) {
     const int w = world.width(), h = world.height();
@@ -134,6 +104,33 @@ Rgb water_rgb(float depth, phd::Water kind) {
 
 } // namespace
 
+Tree tree_in(const phd::World& world, int cx, int cy) {
+    Tree tree;
+    if (cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height()) {
+        return tree;
+    }
+    const auto i = std::size_t(cy) * world.width() + cx;
+    const auto biome = world.biome(i);
+    if (world.water(i) != phd::Water::none || int(biome) >= int(phd::Biome::tidal_shallows) ||
+        world.substrate(i) == phd::Substrate::rock) {
+        return tree;
+    }
+    const auto& cover = covers[int(biome)];
+    const auto h = phd::hash3(cx, cy, 0x7f4a7c15u);
+    if (float(h & 1023) >= cover.trees * 1024.0f) {
+        return tree;
+    }
+    tree.x = float(cx) + 0.15f + float(h >> 10 & 255) / 255.0f * 0.7f;
+    tree.y = float(cy) + 0.15f + float(h >> 18 & 255) / 255.0f * 0.7f;
+    tree.radius = cover.crown * (0.7f + float(h >> 26 & 63) / 63.0f * 0.6f);
+    const Rgb canopy = scale(cover.canopy, 0.9f + float(h >> 4 & 31) / 31.0f * 0.2f);
+    tree.r = std::uint8_t(std::min(255.0f, canopy.r));
+    tree.g = std::uint8_t(std::min(255.0f, canopy.g));
+    tree.b = std::uint8_t(std::min(255.0f, canopy.b));
+    tree.conifer = biome == phd::Biome::taiga || biome == phd::Biome::tundra;
+    return tree;
+}
+
 void biome_rgb(phd::Biome biome, std::uint8_t out[3]) {
     const auto c = biome_colors[int(biome)];
     out[0] = std::uint8_t(c.r);
@@ -163,7 +160,8 @@ void day_tint(const phd::World& world, std::uint8_t out[3]) {
 }
 
 void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
-          bool hill_shade) {
+          bool flat) {
+    const bool hill_shade = flat;
     const int cw = world.width(), ch = world.height();
     const auto& terrain = world.terrain();
     const float inv = 1.0f / float(texels_per_cell);
@@ -285,16 +283,22 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                     const float sx = dx + sun.x * t.radius * 0.9f, sy = dy + sun.y * t.radius * 0.9f;
                     shadowed = shadowed || sx * sx + sy * sy < t.radius * t.radius * 0.85f;
                 }
-                if (top) {
+                if (top && !flat) {
+                    // Forest floor under a tree the tilted view stands up:
+                    // leaf litter and needles, shaded, with a little green.
+                    c = mix(c, (noise >> 12 & 7) == 0 ? Rgb{78, 98, 52} : Rgb{86, 68, 46}, 0.75f);
+                    c = scale(c, 0.8f + grain * 2);
+                    top = nullptr;
+                } else if (top) {
                     const float dx = (x - top->x) / top->radius, dy = (y - top->y) / top->radius;
                     const float dz = std::sqrt(std::max(0.0f, 1 - dx * dx - dy * dy));
                     const float lit = dx * sun.x + dy * sun.y + dz * sun.z;
-                    c = scale(top->canopy, 0.62f + 0.5f * std::max(0.0f, lit) + grain * 2);
+                    c = scale(Rgb{float(top->r), float(top->g), float(top->b)}, 0.62f + 0.5f * std::max(0.0f, lit) + grain * 2);
                     if ((noise >> 8 & 7) == 0) {
                         c = scale(c, 0.85f); // leaf clumps
                     }
-                } else if (shadowed) {
-                    c = scale(c, 0.68f);
+                } else if (shadowed && flat) {
+                    c = scale(c, 0.68f); // the tilted view casts its own shadows
                 }
 
                 const float s = sample(world, x, y, snow);

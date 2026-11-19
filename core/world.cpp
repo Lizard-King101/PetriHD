@@ -348,7 +348,7 @@ void World::update_hydrology() {
             continue;
         }
         if (!lake) {
-            flow_[i] = (flow_[i] * 3 + accumulated_[i]) / 4;
+            flow_[i] = (flow_[i] * 7 + accumulated_[i]) / 8;
         }
         const int down = terrain_.downstream[i];
         if (down >= 0) {
@@ -358,12 +358,18 @@ void World::update_hydrology() {
     for (std::size_t id = 1; id < lakes_.size(); ++id) {
         auto& lake = lakes_[id];
         const auto& basin = terrain_.basins[id];
-        const int t = std::max<int>(temperature_[std::size_t(basin.cell)], 0);
+        // The season's temperature, not the hour's, so ponds don't breathe
+        // in and out with every day and night.
+        const int t = std::max(0, mean_temperature(std::size_t(basin.cell)) +
+                                      isin(season_angle()) * config_.seasons / 1024 / 2);
         // Evaporation follows the lake's surface as it is now, so lakes in dry
         // basins shrink until what they lose matches what flows in.
         const std::int64_t evaporation = std::int64_t(lake_area_[id]) * (t + 20) / 6;
         const std::int64_t capacity = std::int64_t(basin.volume) * 16 + std::int64_t(basin.area) * 16;
-        const std::int64_t change = (std::int64_t(lake.inflow) - evaporation) * 1024 / capacity;
+        // A pond fills or drains by at most 1/64 of its depth a pass, so a
+        // single storm doesn't flood its shore and leave it again in a day.
+        const std::int64_t change = std::clamp<std::int64_t>(
+            (std::int64_t(lake.inflow) - evaporation) * 1024 / capacity, -16, 16);
         lake.level = static_cast<std::uint16_t>(std::clamp<std::int64_t>(lake.level + change, 0, 1024));
         lake.inflow = 0;
     }
@@ -374,6 +380,10 @@ void World::refresh_water() {
     const auto n = cells();
     const int w = config_.width, h = config_.height;
     std::fill(lake_area_.begin(), lake_area_.end(), 0);
+    // Water comes and goes with hysteresis: a cell becomes water past one
+    // mark and only dries below a lower one, so edges that hover on a
+    // threshold don't flicker from pass to pass.
+    previous_water_ = water_;
     for (std::size_t i = 0; i < n; ++i) {
         const int dm = terrain_.elevation[i];
         Water kind = Water::none;
@@ -384,9 +394,10 @@ void World::refresh_water() {
         } else if (const auto id = terrain_.basin[i]) {
             const auto& basin = terrain_.basins[id];
             const int surface = basin.bottom + (basin.spill - basin.bottom) * lakes_[id].level / 1024;
-            if (surface > dm) {
+            const bool was = Water(previous_water_[i]) == Water::lake;
+            if (surface > dm || (was && surface >= dm - 5)) {
                 kind = Water::lake;
-                depth = surface - dm;
+                depth = std::max(1, surface - dm);
                 ++lake_area_[id];
             }
         }
@@ -399,10 +410,11 @@ void World::refresh_water() {
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const auto i = std::size_t(y) * w + x;
-            if (Water(water_[i]) != Water::none || flow_[i] <= river_min_flow) {
+            const bool was = Water(previous_water_[i]) == Water::river;
+            if (Water(water_[i]) != Water::none || flow_[i] <= (was ? river_min_flow / 2 : river_min_flow)) {
                 continue;
             }
-            const int extra = int(isqrt(flow_[i] - river_min_flow));
+            const int extra = int(isqrt(flow_[i] > river_min_flow ? flow_[i] - river_min_flow : 0));
             const int depth = std::min(25, 3 + extra / 6);
             const int radius = std::min(2, extra / 40);
             const int surface = terrain_.elevation[i] + depth;
@@ -419,9 +431,10 @@ void World::refresh_water() {
                     }
                     const auto j = std::size_t(ny) * w + nx;
                     const int bank = surface - terrain_.elevation[j];
-                    if (Water(water_[j]) == Water::none && bank > 0) {
+                    const bool bank_was = Water(previous_water_[j]) == Water::river;
+                    if (Water(water_[j]) == Water::none && (bank > 2 || (bank_was && bank >= -3))) {
                         water_[j] = std::uint8_t(Water::river);
-                        depth_[j] = static_cast<std::uint16_t>(std::min(bank, depth));
+                        depth_[j] = static_cast<std::uint16_t>(std::clamp(bank, 1, depth));
                     }
                 }
             }

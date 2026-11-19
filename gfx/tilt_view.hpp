@@ -39,6 +39,7 @@ public:
               int screen_h, int view_h, double time);
 
     int draw_calls() const { return draw_calls_; }
+    int trees() const { return trees_; }
     int triangles() const { return triangles_; }
 
 private:
@@ -54,7 +55,8 @@ private:
     };
     void build_heights(const phd::World& world);
     void build_chunk(Chunk& chunk);
-    void build_scene(const phd::World& world, const Camera& camera, const Font& font, double time);
+    void build_scene(const phd::World& world, const Camera& camera, const Font& font, double time, int view_w,
+                     int view_h);
 
     float relief_;
     int width_ = 0, height_ = 0;
@@ -71,7 +73,7 @@ private:
     bool scene_ = false;
     float scene_x_ = 0, scene_y_ = 0;
     std::vector<Vertex> scene_vertices_;
-    int draw_calls_ = 0, triangles_ = 0;
+    int draw_calls_ = 0, triangles_ = 0, trees_ = 0;
 };
 
 } // namespace gfx

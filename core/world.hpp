@@ -149,6 +149,7 @@ private:
     std::vector<std::uint8_t> rain_, cloud_;
     std::vector<std::uint32_t> accumulated_;
     std::vector<std::uint32_t> lake_area_;
+    std::vector<std::uint8_t> previous_water_;
 };
 
 } // namespace phd

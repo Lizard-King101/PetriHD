@@ -537,7 +537,8 @@ int main(int argc, char** argv) {
                 format("DRAWS %d  TRIS %d  BAKE %.2f MS  %dX%d Z%d", world_draws + batch.draw_calls(),
                        tilted ? tilt.triangles() : 0, view.bake_ms(), art_w, art_h, target.depth_bits()),
                 format("SIM %.2f MB  RSS %.1f MB", world.memory_bytes() / 1048576.0, resident_bytes() / 1048576.0),
-                format("FRONTS %zu  WIND %d  %s", world.fronts().size(), world.wind_speed(), gl::is_es() ? "GLES" : "GL"),
+                format("FRONTS %zu  WIND %d  TREES %d  %s", world.fronts().size(), world.wind_speed(),
+                       tilted ? tilt.trees() : 0, gl::is_es() ? "GLES" : "GL"),
             };
             font.rect(batch, 4, 4, 4 + 6 * 2 * 44 + 8, 4 + 5 * 18 + 6, panel);
             for (int i = 0; i < 5; ++i) {

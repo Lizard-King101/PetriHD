@@ -203,12 +203,10 @@ void TiltView::place_test_scene(const phd::World& world, float x, float y) {
     }
 }
 
-void TiltView::build_scene(const phd::World& world, const Camera& camera, const Font& font, double time) {
-    (void)camera;
+void TiltView::build_scene(const phd::World& world, const Camera& camera, const Font& font, double time, int view_w,
+                           int view_h) {
     scene_vertices_.clear();
-    if (!scene_) {
-        return;
-    }
+    trees_ = 0;
     float wu, wv;
     font.white(wu, wv);
     const auto sun_art = art::sun_for(world);
@@ -270,6 +268,41 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
             tri({x, y, ground(x, y) + 0.05f}, {sx0, sy0, ground(sx0, sy0) + 0.05f}, {sx1, sy1, ground(sx1, sy1) + 0.05f}, dark);
         }
     };
+
+    // The trees the flat view draws as crowns, standing up: the same spots,
+    // sizes and colours (art::tree_in), so the switch at 32 px per cell keeps
+    // every tree where it was. Those whose tops can reach the view: tall ones
+    // just north of it show above its top edge.
+    {
+        const float half_w = float(view_w) / (2 * camera.px()) + 2;
+        const float reach = float(view_h) / (2 * camera.px() * camera.sin_pitch());
+        const int x0 = std::max(0, int(camera.cx - half_w)), x1 = std::min(width_ - 1, int(camera.cx + half_w));
+        const int y0 = std::max(0, int(camera.cy - reach - 8)), y1 = std::min(height_ - 1, int(camera.cy + reach + 2));
+        for (int cy = y0; cy <= y1; ++cy) {
+            for (int cx = x0; cx <= x1; ++cx) {
+                const auto t = art::tree_in(world, cx, cy);
+                if (t.radius <= 0) {
+                    continue;
+                }
+                ++trees_;
+                const float g = ground(t.x, t.y), r = t.radius, h = 1.2f + r * 2.6f;
+                const Color leaves{t.r, t.g, t.b, 255}, bark{96, 72, 50, 255};
+                shadow(t.x - sun.x * r * 0.9f, t.y - sun.y * r * 0.9f, r * 0.95f);
+                frustum(t.x, t.y, g - 0.05f, g + h * 0.45f, 0.08f + 0.06f * r, 0.05f + 0.03f * r, 5, bark);
+                if (t.conifer) {
+                    frustum(t.x, t.y, g + h * 0.2f, g + h * 0.62f, r, r * 0.45f, 7, leaves);
+                    frustum(t.x, t.y, g + h * 0.5f, g + h, r * 0.7f, 0.0f, 7, leaves);
+                } else {
+                    frustum(t.x, t.y, g + h * 0.35f, g + h * 0.6f, r * 0.55f, r, 7, leaves);
+                    frustum(t.x, t.y, g + h * 0.6f, g + h * 0.85f, r, r * 0.8f, 7, leaves);
+                    frustum(t.x, t.y, g + h * 0.85f, g + h, r * 0.8f, r * 0.25f, 7, leaves);
+                }
+            }
+        }
+    }
+    if (!scene_) {
+        return;
+    }
 
     // The test plant: a tree about two cells tall.
     const float tx = scene_x_, ty = scene_y_, tz = ground(tx, ty);
@@ -372,7 +405,7 @@ void TiltView::draw(const phd::World& world, const Camera& camera, const Texture
         triangles_ += chunk.indices / 3;
     }
 
-    build_scene(world, camera, font, time);
+    build_scene(world, camera, font, time, screen_w, view_h);
     if (!scene_vertices_.empty()) {
         gl::Uniform1f(u_lit_, 0);
         gl::BindTexture(gl::TEXTURE_2D, font.texture().id);

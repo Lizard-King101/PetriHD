@@ -48,6 +48,12 @@ in place. Tilting turns about the ground at the focus, not about sea level.
   formula and slope scale (`art::shade_metres`), so the change at 32 px per
   cell keeps the same shading. When the path switches, what is on screen is
   rebaked at once.
+- **Trees change level of detail at 32 px per cell.** Flat, they are baked
+  crowns. Tilted, the bake leaves the crowns out and paints forest floor
+  (leaf litter, needles) where they were, and the tilted view stands real
+  trees in exactly those places, with the same sizes and colours
+  (`art::tree_in`), casting their own shadows: about 150 triangles each,
+  115 trees and 17,500 triangles in a forest view at 64 px per cell.
 - **Objects:** the test tree and the six-legged test creature are built each
   frame from flat-shaded boxes and frustums. They stand on `TiltView::ground`,
   which follows the mesh's own triangles, so feet stay on the drawn surface.
