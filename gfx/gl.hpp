@@ -27,7 +27,7 @@ constexpr GLenum TEXTURE_2D = 0x0DE1;
 constexpr GLenum UNSIGNED_BYTE = 0x1401, FLOAT = 0x1406;
 constexpr GLenum RGB = 0x1907, RGBA = 0x1908;
 constexpr GLenum VERSION = 0x1F02;
-constexpr GLenum NEAREST = 0x2600;
+constexpr GLenum NEAREST = 0x2600, LINEAR = 0x2601;
 constexpr GLenum TEXTURE_MAG_FILTER = 0x2800, TEXTURE_MIN_FILTER = 0x2801;
 constexpr GLenum TEXTURE_WRAP_S = 0x2802, TEXTURE_WRAP_T = 0x2803;
 constexpr GLenum CLAMP_TO_EDGE = 0x812F;

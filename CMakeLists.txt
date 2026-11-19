@@ -16,11 +16,16 @@ endif()
 option(PETRIHD_GUI "Build the windowed app (needs SDL2)" ON)
 
 # The simulation: deterministic, no dependencies.
-add_library(petrihd_core core/world.cpp core/file.cpp core/png.cpp)
+add_library(petrihd_core core/world.cpp core/terrain.cpp core/file.cpp core/png.cpp)
 target_include_directories(petrihd_core PUBLIC core)
 
+# Terrain art: no GL, so headless screenshots match the window.
+add_library(petrihd_art gfx/terrain_art.cpp)
+target_include_directories(petrihd_art PUBLIC gfx)
+target_link_libraries(petrihd_art PUBLIC petrihd_core)
+
 add_executable(petrihd-run apps/petrihd_run.cpp)
-target_link_libraries(petrihd-run PRIVATE petrihd_core)
+target_link_libraries(petrihd-run PRIVATE petrihd_art)
 
 enable_testing()
 add_executable(petrihd_core_tests tests/core_test.cpp)
@@ -29,9 +34,9 @@ add_test(NAME core COMMAND petrihd_core_tests)
 
 if(PETRIHD_GUI)
     find_package(SDL2 REQUIRED)
-    add_library(petrihd_gfx gfx/gl.cpp gfx/batch.cpp gfx/font.cpp)
+    add_library(petrihd_gfx gfx/gl.cpp gfx/batch.cpp gfx/font.cpp gfx/world_view.cpp)
     target_include_directories(petrihd_gfx PUBLIC gfx ui)
-    target_link_libraries(petrihd_gfx PUBLIC SDL2::SDL2 petrihd_core)
+    target_link_libraries(petrihd_gfx PUBLIC SDL2::SDL2 petrihd_art)
 
     add_executable(petrihd apps/petrihd.cpp)
     target_link_libraries(petrihd PRIVATE petrihd_gfx)

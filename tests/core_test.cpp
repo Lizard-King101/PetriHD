@@ -1,4 +1,5 @@
 #include <cinttypes>
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 
@@ -68,6 +69,56 @@ void test_determinism() {
     CHECK(run(0, 50).fingerprint() == run(0, 50).fingerprint());
 }
 
+void test_land_and_water() {
+    phd::WorldConfig config;
+    config.seed = 4;
+    phd::World world(config);
+    const auto& terrain = world.terrain();
+    const auto n = world.cells();
+    std::size_t ocean = 0, rivers = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        ocean += terrain.ocean[i];
+        rivers += world.water(i) == phd::Water::river;
+        // Water never flows uphill over the filled surface.
+        const int down = terrain.downstream[i];
+        if (down >= 0) {
+            CHECK(terrain.filled[std::size_t(down)] <= terrain.filled[i]);
+        }
+        CHECK(terrain.filled[i] >= terrain.elevation[i]);
+    }
+    const auto percent = 100 * ocean / n;
+    CHECK(percent >= 30 && percent <= 40); // asked for 38, minus inland seas that count as lakes
+    CHECK(rivers > 100);
+    CHECK(terrain.order.size() == n);
+    // The north is colder than the south, and the mountains than the plains.
+    CHECK(world.mean_temperature(0, 0) < world.mean_temperature(world.height() - 1, 0));
+    CHECK(world.mean_temperature(100, 2000) < world.mean_temperature(100, 0));
+
+    // Through a year: snow in the northern winter, rain somewhere, light
+    // that comes and goes each day.
+    std::size_t winter_snow = 0;
+    int darkest = 255, brightest = 0;
+    bool rained = false;
+    for (int t = 0; t < phd::World::ticks_per_year; ++t) {
+        world.step();
+        if (world.season() == 3 && t % 240 == 0) {
+            for (std::size_t i = 0; i < n / 4; ++i) {
+                winter_snow += world.snow(i) > 20;
+            }
+        }
+        for (int nx = 0; nx < world.nodes_x() && !rained; ++nx) {
+            for (int ny = 0; ny < world.nodes_y(); ++ny) {
+                rained = rained || world.rain(nx, ny) > 0;
+            }
+        }
+        darkest = std::min(darkest, world.daylight());
+        brightest = std::max(brightest, world.daylight());
+    }
+    CHECK(winter_snow > 0);
+    CHECK(rained);
+    CHECK(darkest == 0 && brightest > 200);
+}
+
 void test_save_round_trip() {
     auto world = run(5, 300);
     const auto saved = world.save();
@@ -109,7 +160,7 @@ void test_files() {
 // The fingerprint after 2,400 ticks on seed 1. It must match on every
 // platform and build (x86, aarch64, NEON or not). If a change to the world is
 // meant to change it, update it in the same commit and say why.
-constexpr std::uint64_t golden_seed1_t2400 = 0x6045c1b621e393fcull;
+constexpr std::uint64_t golden_seed1_t2400 = 0x71afd5f6a283b7aaull;
 
 void test_golden() {
     const auto value = run(1, 2400).fingerprint();
@@ -123,6 +174,7 @@ int main() {
     test_random_matches_petri();
     test_fnv_known_values();
     test_determinism();
+    test_land_and_water();
     test_save_round_trip();
     test_files();
     test_golden();

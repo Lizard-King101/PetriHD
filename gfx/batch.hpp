@@ -16,9 +16,11 @@ struct Texture {
     int width = 0, height = 0;
 };
 
-// Creates a texture with nearest filtering, for crisp pixel art.
-Texture make_texture(int width, int height, gl::GLenum format, const void* pixels);
+// Creates a texture. Nearest filtering keeps pixel art crisp; smooth is for
+// soft fields such as cloud and fog.
+Texture make_texture(int width, int height, gl::GLenum format, const void* pixels, bool smooth = false);
 void update_texture(const Texture& texture, gl::GLenum format, const void* pixels);
+void update_texture_region(const Texture& texture, int x, int y, int w, int h, gl::GLenum format, const void* pixels);
 
 // Batches textured, tinted quads into as few draw calls as possible: one per
 // change of texture. Coordinates are logical screen pixels, origin top left.

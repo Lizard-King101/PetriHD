@@ -1,9 +1,12 @@
-// petrihd: the windowed world. Milestone 0: the window, mouse-as-touch, the
-// world view with pan and zoom, the control bar and the budget HUD.
+// petrihd: the windowed world: the terrain and its weather, pan and zoom by
+// mouse or touch, the control bar, the cell inspector and the budget HUD.
 //
 //   petrihd [--seed N] [--size WxH] [--load FILE] [--shot FILE.png]
+//           [--ticks N]                (run N ticks before showing)
+//           [--frames N --speed 0-3]   (run N frames, print timings, quit)
 //
 // Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
+// Long-press or right-click a cell to inspect it.
 
 #include <SDL.h>
 
@@ -22,10 +25,10 @@
 #include "file.hpp"
 #include "font.hpp"
 #include "gl.hpp"
-#include "palette.hpp"
 #include "png.hpp"
 #include "pointer.hpp"
 #include "world.hpp"
+#include "world_view.hpp"
 
 namespace {
 
@@ -80,11 +83,20 @@ std::string clock_label(std::uint64_t tick) {
     return format("DAY %" PRIu64 "  %s  %02d:%02d", day + 1, season, minutes / 60, minutes % 60);
 }
 
-struct Camera {
-    float x = 0, y = 0;    // world cell at the view's top left
-    float zoom = 2;        // pixels per cell, shown
-    float target_zoom = 2; // the integer zoom it is moving to
-};
+using gfx::Camera;
+
+constexpr float panel_width = 260;
+constexpr double long_press_seconds = 0.45;
+constexpr double bake_budget_seconds = 0.003;
+
+const char* water_name(phd::Water kind) {
+    switch (kind) {
+    case phd::Water::ocean: return "SEA";
+    case phd::Water::lake: return "LAKE";
+    case phd::Water::river: return "RIVER";
+    default: return "NONE";
+    }
+}
 
 bool screenshot(const std::string& path, int width, int height) {
     std::vector<std::uint8_t> rgba(std::size_t(width) * height * 4), rgb(std::size_t(width) * height * 3);
@@ -130,6 +142,8 @@ int main(int argc, char** argv) {
     int width = 800, height = 480;
     std::string load, shot, save_path = "petrihd.phdw";
     bool quit_after_shot = false;
+    int bench_frames = 0, start_speed = 1;
+    long long skip_ticks = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const bool more = i + 1 < argc;
@@ -139,11 +153,18 @@ int main(int argc, char** argv) {
         } else if (arg == "--load" && more) {
             load = argv[++i];
             save_path = load;
+        } else if (arg == "--ticks" && more) {
+            skip_ticks = std::atoll(argv[++i]);
+        } else if (arg == "--frames" && more) {
+            bench_frames = std::atoi(argv[++i]);
+        } else if (arg == "--speed" && more) {
+            start_speed = std::clamp(std::atoi(argv[++i]), 0, 3);
         } else if (arg == "--shot" && more) {
             shot = argv[++i];
             quit_after_shot = true;
         } else {
-            std::fprintf(stderr, "usage: %s [--seed N] [--size WxH] [--load FILE] [--shot FILE.png]\n", argv[0]);
+            std::fprintf(stderr, "usage: %s [--seed N] [--size WxH] [--load FILE] [--shot FILE.png] "
+                                 "[--frames N --speed 0-3]\n", argv[0]);
             return 2;
         }
     }
@@ -161,7 +182,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "no GLES 2 or GL 2.1 context: %s\n", SDL_GetError());
         return 1;
     }
-    SDL_GL_SetSwapInterval(1);
+    SDL_GL_SetSwapInterval(bench_frames ? 0 : 1);
     if (const char* missing = gl::load()) {
         std::fprintf(stderr, "missing %s\n", missing);
         return 1;
@@ -182,9 +203,13 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    std::vector<std::uint8_t> rgb;
-    phd::world_rgb(world, rgb);
-    const auto world_texture = gfx::make_texture(world.width(), world.height(), gl::RGB, rgb.data());
+    for (long long t = 0; t < skip_ticks; ++t) {
+        world.step();
+    }
+    gfx::WorldView view;
+    if (!view.init(world)) {
+        return 1;
+    }
 
     const int view_height = height - bar_height;
     Camera camera;
@@ -205,7 +230,7 @@ int main(int argc, char** argv) {
         clamp_camera();
     };
 
-    int speed = 1;
+    int speed = start_speed;
     bool hud = true, running = true;
     double accumulator = 0, tick_ms = 0, frame_ms = 0, fps = 60, last_frame = now_seconds();
     double last_save = last_frame;
@@ -220,6 +245,15 @@ int main(int argc, char** argv) {
 
     // Pointers: one drags, two pinch.
     std::map<SDL_FingerID, ui::Pointer> held;
+    int inspected = -1;          // the cell in the inspector, or -1
+    double press_time = 0;       // when the single pointer went down
+    float press_x = 0, press_y = 0;
+    bool press_moved = false, press_fired = false;
+    const auto cell_at = [&](float px, float py) {
+        const int cx = int(std::floor(camera.x + px / camera.zoom)), cy = int(std::floor(camera.y + py / camera.zoom));
+        return cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height() ? -1 : cy * world.width() + cx;
+    };
+    std::vector<double> frame_samples;
     float pinch_start = 0;
     bool dragging = false;
     float drag_x = 0, drag_y = 0;
@@ -234,6 +268,9 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = false;
+            } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_RIGHT &&
+                       event.button.y < view_height) {
+                inspected = cell_at(float(event.button.x), float(event.button.y));
             } else if (event.type == SDL_KEYDOWN) {
                 switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE: running = false; break;
@@ -262,8 +299,17 @@ int main(int argc, char** argv) {
                     }
                     continue;
                 }
+                if (inspected >= 0 && p.x >= float(width) - panel_width) {
+                    inspected = -1; // tapping the inspector closes it
+                    continue;
+                }
                 held[p.id] = p;
                 dragging = held.size() == 1;
+                press_time = held.size() == 1 ? now_seconds() : 0;
+                press_x = p.x;
+                press_y = p.y;
+                press_moved = false;
+                press_fired = false;
                 drag_x = p.x;
                 drag_y = p.y;
                 if (held.size() == 2) {
@@ -272,6 +318,9 @@ int main(int argc, char** argv) {
                 }
             } else if (p.type == ui::Pointer::move && held.count(p.id)) {
                 held[p.id] = p;
+                if (std::hypot(p.x - press_x, p.y - press_y) > 8) {
+                    press_moved = true;
+                }
                 if (held.size() == 1 && dragging) {
                     camera.x -= (p.x - drag_x) / camera.zoom;
                     camera.y -= (p.y - drag_y) / camera.zoom;
@@ -288,6 +337,9 @@ int main(int argc, char** argv) {
                     }
                 }
             } else if (p.type == ui::Pointer::up) {
+                if (held.size() == 1 && held.count(p.id) && !press_moved && !press_fired) {
+                    inspected = -1; // a short tap on the world closes the inspector
+                }
                 held.erase(p.id);
                 dragging = false;
                 if (held.size() == 1) {
@@ -296,6 +348,13 @@ int main(int argc, char** argv) {
                     dragging = true;
                 }
             }
+        }
+
+        // A long press without moving inspects the cell under it.
+        if (held.size() == 1 && press_time > 0 && !press_moved && !press_fired &&
+            now_seconds() - press_time > long_press_seconds) {
+            inspected = cell_at(press_x, press_y);
+            press_fired = true;
         }
 
         // Smooth zoom toward the integer target, about the view's center or
@@ -336,9 +395,8 @@ int main(int argc, char** argv) {
         if (done) {
             const double ms = (now_seconds() - sim_start) * 1000.0 / done;
             tick_ms = tick_ms == 0 ? ms : tick_ms * 0.9 + ms * 0.1;
-            phd::world_rgb(world, rgb);
-            gfx::update_texture(world_texture, gl::RGB, rgb.data());
         }
+        view.refresh(world, camera, width, view_height, bake_budget_seconds);
         if (frame_start - last_save > autosave_seconds) {
             save();
         }
@@ -350,9 +408,43 @@ int main(int argc, char** argv) {
         gl::ClearColor(0.04f, 0.05f, 0.05f, 1);
         gl::Clear(gl::COLOR_BUFFER_BIT);
         batch.begin(width, height);
-        const float x0 = -camera.x * camera.zoom, y0 = -camera.y * camera.zoom;
-        batch.quad(world_texture, x0, y0, x0 + world.width() * camera.zoom, y0 + world.height() * camera.zoom, 0, 0,
-                   1, 1, white);
+        view.draw(batch, font, world, camera, width, view_height, frame_start);
+        if (inspected >= 0) {
+            const float cx = (float(inspected % world.width()) - camera.x) * camera.zoom;
+            const float cy = (float(inspected / world.width()) - camera.y) * camera.zoom;
+            const float z = std::max(camera.zoom, 3.0f);
+            const gfx::Color mark{255, 240, 120, 230};
+            font.rect(batch, cx - 1, cy - 1, cx + z + 1, cy, mark);
+            font.rect(batch, cx - 1, cy + z, cx + z + 1, cy + z + 1, mark);
+            font.rect(batch, cx - 1, cy, cx, cy + z, mark);
+            font.rect(batch, cx + z, cy, cx + z + 1, cy + z, mark);
+        }
+
+        // The cell inspector.
+        if (inspected >= 0) {
+            const auto i = std::size_t(inspected);
+            const float px = float(width) - panel_width;
+            const int t = world.temperature(i);
+            const std::string lines[] = {
+                phd::biome_name(world.biome(i)),
+                format("CELL %d, %d", inspected % world.width(), inspected / world.width()),
+                format("HEIGHT %d M", world.elevation(i)),
+                format("WATER %s %.1f M", water_name(world.water(i)), world.water_depth_dm(i) / 10.0),
+                format("TEMP %s%d.%d C", t < 0 ? "-" : "", std::abs(t) / 10, std::abs(t) % 10),
+                format("SOIL WATER %d", world.soil_water(i)),
+                format("MOISTURE %d", world.moisture(i)),
+                format("SNOW %d", world.snow(i)),
+                format("FLOW %u", world.flow(i)),
+                format("NUTRIENTS %d", world.nutrients(i)),
+            };
+            font.rect(batch, px, 0, float(width), float(view_height), panel);
+            int row = 0;
+            for (const auto& line : lines) {
+                font.text(batch, px + 10, 12 + float(row) * 20, line, 2, row == 0 ? accent : white);
+                ++row;
+            }
+            font.text(batch, px + 10, float(view_height) - 22, "TAP HERE TO CLOSE", 2, dim);
+        }
 
         // The control bar.
         font.rect(batch, 0, float(view_height), float(width), float(height), {12, 15, 14, 255});
@@ -375,11 +467,11 @@ int main(int argc, char** argv) {
             const std::string lines[] = {
                 format("TICK %.3f MS  PI~%.2f/%.0f MS", tick_ms, pi_ms, pi_tick_budget_ms),
                 format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f", frame_ms, fps, camera.target_zoom),
-                format("DRAWS %d  QUADS %d", batch.draw_calls(), batch.quads()),
+                format("DRAWS %d  QUADS %d  BAKE %.2f MS", batch.draw_calls(), batch.quads(), view.bake_ms()),
                 format("SIM %.2f MB  RSS %.1f MB", world.memory_bytes() / 1048576.0, resident_bytes() / 1048576.0),
-                format("TICK %" PRIu64 "  %s", world.tick(), gl::is_es() ? "GLES" : "GL"),
+                format("FRONTS %zu  WIND %d  %s", world.fronts().size(), world.wind_speed(), gl::is_es() ? "GLES" : "GL"),
             };
-            font.rect(batch, 4, 4, 4 + 6 * 2 * 34 + 8, 4 + 5 * 18 + 6, panel);
+            font.rect(batch, 4, 4, 4 + 6 * 2 * 40 + 8, 4 + 5 * 18 + 6, panel);
             for (int i = 0; i < 5; ++i) {
                 font.text(batch, 10, 10 + float(i) * 18, lines[i], 2, i == 0 && pi_ms > pi_tick_budget_ms ? warn : white);
             }
@@ -396,6 +488,22 @@ int main(int argc, char** argv) {
             shot.clear();
         }
         frame_ms = (now_seconds() - frame_start) * 1000.0;
+        if (bench_frames) {
+            frame_samples.push_back(frame_ms);
+            if (int(frame_samples.size()) >= bench_frames) {
+                std::vector<double> sorted = frame_samples;
+                std::sort(sorted.begin(), sorted.end());
+                double sum = 0;
+                for (const double v : sorted) {
+                    sum += v;
+                }
+                std::printf("frames=%zu frame_ms_mean=%.2f frame_ms_p99=%.2f frame_ms_max=%.2f tick_ms=%.3f bake_ms=%.2f "
+                            "ticks=%" PRIu64 "\n",
+                            sorted.size(), sum / double(sorted.size()), sorted[sorted.size() * 99 / 100], sorted.back(),
+                            tick_ms, view.bake_ms(), world.tick());
+                running = false;
+            }
+        }
         SDL_GL_SwapWindow(window);
         const double interval = now_seconds() - frame_start;
         if (interval > 0) {

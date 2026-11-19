@@ -1,7 +1,8 @@
 // petrihd-run: runs a world headless, as fast as the machine allows, and
 // prints a census line of key=value pairs every so often.
 //
-//   petrihd-run seed=1 ticks=2400 every=240 [load=in.phdw] [save=out.phdw] [png=out.png]
+//   petrihd-run seed=1 ticks=3840 every=480 [ocean=38] [biomes=1]
+//               [load=in.phdw] [save=out.phdw] [png=out.png]
 
 #include <chrono>
 #include <cinttypes>
@@ -11,27 +12,53 @@
 #include <string>
 
 #include "file.hpp"
-#include "palette.hpp"
 #include "png.hpp"
+#include "terrain_art.hpp"
 #include "world.hpp"
 
 namespace {
 
-void census(const phd::World& world, double tick_us) {
-    const auto n = std::size_t(world.width()) * world.height();
-    std::uint64_t sum = 0;
+void census(const phd::World& world, double tick_us, bool biomes) {
+    const auto n = world.cells();
+    std::size_t ocean = 0, lake = 0, river = 0, snow = 0, land = 0;
+    std::int64_t temperature = 0, soil = 0;
+    std::size_t counts[phd::biome_count] = {};
     for (std::size_t i = 0; i < n; ++i) {
-        sum += world.nutrients()[i];
+        const auto kind = world.water(i);
+        ocean += kind == phd::Water::ocean;
+        lake += kind == phd::Water::lake;
+        river += kind == phd::Water::river;
+        snow += world.snow(i) > 20;
+        temperature += world.temperature(i);
+        if (kind == phd::Water::none) {
+            ++land;
+            soil += world.soil_water(i);
+        }
+        ++counts[int(world.biome(i))];
     }
-    std::printf("tick=%" PRIu64 " fingerprint=%016" PRIx64 " nutrients_mean=%.2f tick_us=%.1f\n", world.tick(),
-                world.fingerprint(), double(sum) / double(n), tick_us);
+    int present = 0;
+    for (const auto count : counts) {
+        present += count > 0;
+    }
+    std::printf("tick=%" PRIu64 " fingerprint=%016" PRIx64
+                " day=%" PRIu64 " season=%d ocean_pct=%.1f lake_cells=%zu river_cells=%zu snow_cells=%zu"
+                " temp_c=%.1f soil=%.1f fronts=%zu biomes=%d tick_us=%.1f\n",
+                world.tick(), world.fingerprint(), world.tick() / phd::World::ticks_per_day + 1, world.season(),
+                100.0 * double(ocean) / double(n), lake, river, snow, double(temperature) / double(n) / 10.0,
+                land ? double(soil) / double(land) : 0.0, world.fronts().size(), present, tick_us);
+    if (biomes) {
+        for (int b = 0; b < phd::biome_count; ++b) {
+            std::printf("  %-17s %6.2f%%\n", phd::biome_name(phd::Biome(b)), 100.0 * double(counts[b]) / double(n));
+        }
+    }
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     phd::WorldConfig config;
-    std::uint64_t ticks = 2400, every = 240;
+    std::uint64_t ticks = 3840, every = 480;
+    bool biomes = false;
     std::string load, save, png;
     for (int i = 1; i < argc; ++i) {
         const char* eq = std::strchr(argv[i], '=');
@@ -46,6 +73,10 @@ int main(int argc, char** argv) {
             ticks = std::strtoull(value.c_str(), nullptr, 0);
         } else if (key == "every") {
             every = std::strtoull(value.c_str(), nullptr, 0);
+        } else if (key == "ocean") {
+            config.ocean_percent = std::atoi(value.c_str());
+        } else if (key == "biomes") {
+            biomes = value != "0";
         } else if (key == "load") {
             load = value;
         } else if (key == "save") {
@@ -74,13 +105,13 @@ int main(int argc, char** argv) {
         ++since;
         if (every && (world.tick() % every == 0 || world.tick() == end)) {
             const auto now = std::chrono::steady_clock::now();
-            census(world, std::chrono::duration<double, std::micro>(now - started).count() / double(since));
+            census(world, std::chrono::duration<double, std::micro>(now - started).count() / double(since), biomes);
             started = now;
             since = 0;
         }
     }
     if (!every) {
-        census(world, 0);
+        census(world, 0, biomes);
     }
     if (!save.empty() && !phd::write_file_atomic(save, world.save())) {
         std::fprintf(stderr, "could not save %s\n", save.c_str());
@@ -88,8 +119,9 @@ int main(int argc, char** argv) {
     }
     if (!png.empty()) {
         std::vector<std::uint8_t> rgb;
-        phd::world_rgb(world, rgb);
-        if (!phd::write_png(png, world.width(), world.height(), rgb)) {
+        int w = 0, h = 0;
+        art::bake_all(world, rgb, w, h);
+        if (!phd::write_png(png, w, h, rgb)) {
             std::fprintf(stderr, "could not write %s\n", png.c_str());
             return 1;
         }

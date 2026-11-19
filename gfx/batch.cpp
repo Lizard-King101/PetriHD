@@ -4,12 +4,13 @@
 
 namespace gfx {
 
-Texture make_texture(int width, int height, gl::GLenum format, const void* pixels) {
+Texture make_texture(int width, int height, gl::GLenum format, const void* pixels, bool smooth) {
     Texture texture{0, width, height};
     gl::GenTextures(1, &texture.id);
     gl::BindTexture(gl::TEXTURE_2D, texture.id);
-    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST);
-    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST);
+    const auto filter = gl::GLint(smooth ? gl::LINEAR : gl::NEAREST);
+    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, filter);
+    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, filter);
     gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
     gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
     gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
@@ -21,6 +22,12 @@ void update_texture(const Texture& texture, gl::GLenum format, const void* pixel
     gl::BindTexture(gl::TEXTURE_2D, texture.id);
     gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
     gl::TexSubImage2D(gl::TEXTURE_2D, 0, 0, 0, texture.width, texture.height, format, gl::UNSIGNED_BYTE, pixels);
+}
+
+void update_texture_region(const Texture& texture, int x, int y, int w, int h, gl::GLenum format, const void* pixels) {
+    gl::BindTexture(gl::TEXTURE_2D, texture.id);
+    gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
+    gl::TexSubImage2D(gl::TEXTURE_2D, 0, x, y, w, h, format, gl::UNSIGNED_BYTE, pixels);
 }
 
 bool Batch::init() {
