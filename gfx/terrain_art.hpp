@@ -27,12 +27,15 @@ Sun sun_for(const phd::World& world);
 void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
           bool flat = true);
 
-// A tree rooted in a cell, from the cell's biome and a hash of the cell, so it
-// stays put however the camera moves. Both views draw the same trees.
+// The tree filling a cell, if any, as both views draw it: where it stands,
+// its size, its colour this season. From the plant itself.
 struct Tree {
-    float x = 0, y = 0, radius = 0; // crown centre and radius, in cells; radius 0 for none
-    std::uint8_t r = 0, g = 0, b = 0; // canopy colour
+    float x = 0, y = 0, radius = 0; // trunk position and crown radius, in cells; radius 0 for none
+    float height = 0;               // in cells
+    std::uint8_t r = 0, g = 0, b = 0; // canopy colour, with the season
     bool conifer = false;
+    bool bare = false;              // deciduous, in winter
+    std::uint32_t id = 0;           // the plant
 };
 Tree tree_in(const phd::World& world, int cx, int cy);
 

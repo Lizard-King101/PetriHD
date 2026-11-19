@@ -16,7 +16,7 @@ endif()
 option(PETRIHD_GUI "Build the windowed app (needs SDL2)" ON)
 
 # The simulation: deterministic, no dependencies.
-add_library(petrihd_core core/world.cpp core/terrain.cpp core/file.cpp core/png.cpp)
+add_library(petrihd_core core/world.cpp core/terrain.cpp core/plants.cpp core/file.cpp core/png.cpp)
 target_include_directories(petrihd_core PUBLIC core)
 
 # Terrain art: no GL, so headless screenshots match the window.

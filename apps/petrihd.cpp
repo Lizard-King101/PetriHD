@@ -101,6 +101,21 @@ const char* substrate_name(phd::Substrate s) {
     return names[int(s)];
 }
 
+// One plant in a cell, for the inspector: what it is, how tall, how old,
+// and two of its genes.
+std::string plant_line(const phd::World& world, std::size_t cell, int slot) {
+    const phd::Plant* p = world.occupant(cell, slot);
+    if (!p || (p->slot == phd::whole_cell && slot > 0)) {
+        return slot == 0 ? "NO PLANTS" : "";
+    }
+    const char* kind = p->slot == phd::whole_cell ? "TREE" : phd::woody(p->genome) ? "SHRUB"
+                       : p->genome.gene[phd::gene_flood] > 160                       ? "REED"
+                       : p->genome.gene[phd::gene_lifespan] < 48                     ? "HERB"
+                                                                                     : "GRASS";
+    return format("%s %.1fM %dD DRY%d COLD%d", kind, p->height / 10.0, p->age / phd::passes_per_day,
+                  p->genome.gene[phd::gene_drought], p->genome.gene[phd::gene_cold]);
+}
+
 const char* water_name(phd::Water kind) {
     switch (kind) {
     case phd::Water::ocean: return "SEA";
@@ -516,7 +531,11 @@ int main(int argc, char** argv) {
                 format("MOISTURE %d", world.moisture(i)),
                 format("SNOW %d", world.snow(i)),
                 format("FLOW %u", world.flow(i)),
-                format("NUTRIENTS %d", world.nutrients(i)),
+                format("NUTRIENTS %d  LITTER %d", world.nutrients(i), world.litter(i)),
+                plant_line(world, i, 0),
+                plant_line(world, i, 1),
+                plant_line(world, i, 2),
+                plant_line(world, i, 3),
             };
             font.rect(batch, px, 0, float(width), float(view_height), panel);
             int row = 0;
