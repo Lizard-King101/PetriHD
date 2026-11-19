@@ -291,6 +291,9 @@ int main(int argc, char** argv) {
         return cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height() ? -1 : cy * world.width() + cx;
     };
     std::vector<double> frame_samples;
+    // Where zooming is centred: the pointer that last scrolled or pinched.
+    float zoom_anchor_x = float(width) / 2, zoom_anchor_y = float(view_height) / 2;
+    float pinch_zoom = 0;
     float pinch_start = 0;
     bool dragging = false;
     float drag_x = 0, drag_y = 0;
@@ -301,13 +304,17 @@ int main(int argc, char** argv) {
 
     while (running) {
         const double frame_start = now_seconds();
+        int window_w = width, window_h = height;
+        SDL_GetWindowSize(window, &window_w, &window_h);
+        const float input_x = float(width) / float(std::max(1, window_w));
+        const float input_y = float(height) / float(std::max(1, window_h));
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = false;
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_RIGHT &&
-                       event.button.y < view_height) {
-                inspected = cell_at(float(event.button.x), float(event.button.y));
+                       float(event.button.y) * input_y < float(view_height)) {
+                inspected = cell_at(float(event.button.x) * input_x, float(event.button.y) * input_y);
             } else if (event.type == SDL_KEYDOWN) {
                 switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE: running = false; break;
@@ -328,9 +335,15 @@ int main(int argc, char** argv) {
                 default: break;
                 }
             }
-            const auto p = ui::pointer_from(event, width, height);
+            const auto p = ui::pointer_from(event, width, height, input_x, input_y);
             if (p.type == ui::Pointer::wheel && p.y < view_height) {
-                camera.target_zoom = std::clamp(p.scroll > 0 ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, max_zoom());
+                // Proportional to how far the wheel turned: a notch is about
+                // x1.4, so two notches double the zoom. Smooth-scrolling wheels
+                // and touchpads send fractions of a notch.
+                const float notches = std::clamp(p.scroll, -3.0f, 3.0f);
+                camera.target_zoom = std::clamp(camera.target_zoom * std::pow(2.0f, notches * 0.5f), 1.0f, max_zoom());
+                zoom_anchor_x = p.x;
+                zoom_anchor_y = p.y;
             } else if (p.type == ui::Pointer::down) {
                 if (p.y >= view_height) {
                     for (int i = 0; i < 4; ++i) {
@@ -358,6 +371,7 @@ int main(int argc, char** argv) {
                 if (held.size() == 2) {
                     const auto a = held.begin()->second, b = std::next(held.begin())->second;
                     pinch_start = std::hypot(a.x - b.x, a.y - b.y);
+                    pinch_zoom = camera.target_zoom;
                 }
             } else if (p.type == ui::Pointer::move && held.count(p.id)) {
                 held[p.id] = p;
@@ -372,12 +386,11 @@ int main(int argc, char** argv) {
                     clamp_camera();
                 } else if (held.size() == 2 && pinch_start > 0) {
                     const auto a = held.begin()->second, b = std::next(held.begin())->second;
+                    // The zoom follows the fingers' spread, about their midpoint.
                     const float distance = std::hypot(a.x - b.x, a.y - b.y);
-                    if (distance > pinch_start * 1.5f || distance < pinch_start / 1.5f) {
-                        const bool in = distance > pinch_start;
-                        camera.target_zoom = std::clamp(in ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, max_zoom());
-                        pinch_start = distance;
-                    }
+                    camera.target_zoom = std::clamp(pinch_zoom * distance / pinch_start, 1.0f, max_zoom());
+                    zoom_anchor_x = (a.x + b.x) / 2;
+                    zoom_anchor_y = (a.y + b.y) / 2;
                 }
             } else if (p.type == ui::Pointer::up) {
                 if (held.size() == 1 && held.count(p.id) && !press_moved && !press_fired) {
@@ -400,16 +413,9 @@ int main(int argc, char** argv) {
             press_fired = true;
         }
 
-        // Smooth zoom toward the integer target, about the view's center or
-        // the pointer.
+        // Smooth zoom toward the target, about the pointer that asked for it.
         if (camera.zoom != camera.target_zoom) {
-            float sx = float(width) / 2, sy = float(view_height) / 2;
-            int mx = 0, my = 0;
-            SDL_GetMouseState(&mx, &my);
-            if (my < view_height) {
-                sx = float(mx);
-                sy = float(my);
-            }
+            const float sx = zoom_anchor_x, sy = std::min(zoom_anchor_y, float(view_height));
             float next = camera.zoom * std::pow(camera.target_zoom / camera.zoom, 0.25f);
             if (std::fabs(next / camera.target_zoom - 1) < 0.002f) {
                 next = camera.target_zoom;
@@ -417,8 +423,17 @@ int main(int argc, char** argv) {
             zoom_at(next, sx, sy);
         }
 
-        // Tilting turns about the ground at the focus, not sea level.
-        camera.focus_z += (tilt.ground(camera.cx, camera.cy) - camera.focus_z) * 0.2f;
+        // Tilting turns about the ground at the focus, not sea level. When the
+        // pivot's height follows the ground, it slides along the line of sight
+        // too, so the picture doesn't move: panning over hills then tracks the
+        // finger in every direction.
+        {
+            const float rise = (tilt.ground(camera.cx, camera.cy) - camera.focus_z) * 0.2f;
+            camera.focus_z += rise;
+            if (camera.sin_pitch() > 0.01f) {
+                camera.cy += rise * camera.cos_pitch() / camera.sin_pitch();
+            }
+        }
 
         // Simulation.
         const double dt = std::min(0.25, frame_start - last_frame);
