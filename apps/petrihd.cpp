@@ -1,0 +1,412 @@
+// petrihd: the windowed world. Milestone 0: the window, mouse-as-touch, the
+// world view with pan and zoom, the control bar and the budget HUD.
+//
+//   petrihd [--seed N] [--size WxH] [--load FILE] [--shot FILE.png]
+//
+// Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
+
+#include <SDL.h>
+
+#include <algorithm>
+#include <cinttypes>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdarg>
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "batch.hpp"
+#include "file.hpp"
+#include "font.hpp"
+#include "gl.hpp"
+#include "palette.hpp"
+#include "png.hpp"
+#include "pointer.hpp"
+#include "world.hpp"
+
+namespace {
+
+constexpr int bar_height = 32;
+constexpr double ticks_per_second = 10.0;
+// Pi time is guessed as PC time x 8 until the Pi has been measured.
+constexpr double pi_factor = 8.0;
+// 10 ticks/s using at most half of three cores: 150 core-ms per tick.
+constexpr double pi_tick_budget_ms = 150.0;
+constexpr double autosave_seconds = 300.0;
+
+const gfx::Color white{255, 255, 255, 255}, dim{170, 180, 170, 255}, panel{16, 20, 18, 220},
+    accent{120, 210, 140, 255}, warn{240, 150, 90, 255};
+
+struct Speed {
+    const char* label;
+    double multiplier; // 0 = paused, < 0 = as fast as the frame allows
+};
+const Speed speeds[] = {{"|", 0}, {">", 1}, {">>", 4}, {">>>", -1}};
+
+double now_seconds() { return double(SDL_GetPerformanceCounter()) / double(SDL_GetPerformanceFrequency()); }
+
+std::size_t resident_bytes() {
+#ifdef __linux__
+    if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+        unsigned long pages = 0, resident = 0;
+        const int n = std::fscanf(f, "%lu %lu", &pages, &resident);
+        std::fclose(f);
+        if (n == 2) {
+            return std::size_t(resident) * 4096;
+        }
+    }
+#endif
+    return 0;
+}
+
+std::string format(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+std::string format(const char* fmt, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    return buffer;
+}
+
+std::string clock_label(std::uint64_t tick) {
+    const auto day = tick / phd::World::ticks_per_day;
+    const char* seasons[] = {"SPRING", "SUMMER", "AUTUMN", "WINTER"};
+    const auto season = seasons[(day % phd::World::days_per_year) / (phd::World::days_per_year / 4)];
+    const int minutes = int((tick % phd::World::ticks_per_day) * 24 * 60 / phd::World::ticks_per_day);
+    return format("DAY %" PRIu64 "  %s  %02d:%02d", day + 1, season, minutes / 60, minutes % 60);
+}
+
+struct Camera {
+    float x = 0, y = 0;    // world cell at the view's top left
+    float zoom = 2;        // pixels per cell, shown
+    float target_zoom = 2; // the integer zoom it is moving to
+};
+
+bool screenshot(const std::string& path, int width, int height) {
+    std::vector<std::uint8_t> rgba(std::size_t(width) * height * 4), rgb(std::size_t(width) * height * 3);
+    gl::PixelStorei(gl::PACK_ALIGNMENT, 1);
+    gl::ReadPixels(0, 0, width, height, gl::RGBA, gl::UNSIGNED_BYTE, rgba.data());
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const auto* s = &rgba[(std::size_t(height - 1 - y) * width + x) * 4];
+            auto* d = &rgb[(std::size_t(y) * width + x) * 3];
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+        }
+    }
+    return phd::write_png(path, width, height, rgb);
+}
+
+SDL_GLContext create_context(SDL_Window*& window, int width, int height) {
+    // GLES 2 first, as on the Pi; desktop GL 2.1 where there is no GLES.
+    const int profiles[][3] = {{SDL_GL_CONTEXT_PROFILE_ES, 2, 0}, {0, 2, 1}};
+    for (const auto& profile : profiles) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, profile[0]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, profile[1]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, profile[2]);
+        window = SDL_CreateWindow("Petri HD", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
+                                  SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+        if (!window) {
+            continue;
+        }
+        if (SDL_GLContext context = SDL_GL_CreateContext(window)) {
+            return context;
+        }
+        SDL_DestroyWindow(window);
+        window = nullptr;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    phd::WorldConfig config;
+    int width = 800, height = 480;
+    std::string load, shot, save_path = "petrihd.phdw";
+    bool quit_after_shot = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        const bool more = i + 1 < argc;
+        if (arg == "--seed" && more) {
+            config.seed = std::uint32_t(std::strtoul(argv[++i], nullptr, 0));
+        } else if (arg == "--size" && more && std::sscanf(argv[++i], "%dx%d", &width, &height) == 2) {
+        } else if (arg == "--load" && more) {
+            load = argv[++i];
+            save_path = load;
+        } else if (arg == "--shot" && more) {
+            shot = argv[++i];
+            quit_after_shot = true;
+        } else {
+            std::fprintf(stderr, "usage: %s [--seed N] [--size WxH] [--load FILE] [--shot FILE.png]\n", argv[0]);
+            return 2;
+        }
+    }
+
+    // Touches arrive as finger events only, and the mouse as mouse events only.
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+    SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+        std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_Window* window = nullptr;
+    SDL_GLContext context = create_context(window, width, height);
+    if (!context) {
+        std::fprintf(stderr, "no GLES 2 or GL 2.1 context: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_GL_SetSwapInterval(1);
+    if (const char* missing = gl::load()) {
+        std::fprintf(stderr, "missing %s\n", missing);
+        return 1;
+    }
+    const std::string gl_version = reinterpret_cast<const char*>(gl::GetString(gl::VERSION));
+
+    gfx::Batch batch;
+    gfx::Font font;
+    if (!batch.init() || !font.init()) {
+        return 1;
+    }
+
+    phd::World world(config);
+    if (!load.empty()) {
+        std::vector<std::uint8_t> data;
+        if (!phd::read_file(load, data) || !world.load(data.data(), data.size())) {
+            std::fprintf(stderr, "could not load %s\n", load.c_str());
+            return 1;
+        }
+    }
+    std::vector<std::uint8_t> rgb;
+    phd::world_rgb(world, rgb);
+    const auto world_texture = gfx::make_texture(world.width(), world.height(), gl::RGB, rgb.data());
+
+    const int view_height = height - bar_height;
+    Camera camera;
+    const auto clamp_camera = [&] {
+        const float visible_w = float(width) / camera.zoom, visible_h = float(view_height) / camera.zoom;
+        const auto axis = [](float& at, float visible, int size) {
+            at = visible >= float(size) ? (float(size) - visible) / 2 : std::clamp(at, 0.0f, float(size) - visible);
+        };
+        axis(camera.x, visible_w, world.width());
+        axis(camera.y, visible_h, world.height());
+    };
+    clamp_camera();
+    const auto zoom_at = [&](float zoom, float sx, float sy) {
+        const float wx = camera.x + sx / camera.zoom, wy = camera.y + sy / camera.zoom;
+        camera.zoom = zoom;
+        camera.x = wx - sx / camera.zoom;
+        camera.y = wy - sy / camera.zoom;
+        clamp_camera();
+    };
+
+    int speed = 1;
+    bool hud = true, running = true;
+    double accumulator = 0, tick_ms = 0, frame_ms = 0, fps = 60, last_frame = now_seconds();
+    double last_save = last_frame;
+    std::string status;
+    double status_until = 0;
+    const auto save = [&] {
+        const bool ok = phd::write_file_atomic(save_path, world.save());
+        status = ok ? "SAVED " + save_path : "SAVE FAILED";
+        status_until = now_seconds() + 2;
+        last_save = now_seconds();
+    };
+
+    // Pointers: one drags, two pinch.
+    std::map<SDL_FingerID, ui::Pointer> held;
+    float pinch_start = 0;
+    bool dragging = false;
+    float drag_x = 0, drag_y = 0;
+    const auto button_rect = [&](int index, float& x0, float& x1) {
+        x0 = 4.0f + float(index) * 44.0f;
+        x1 = x0 + 40.0f;
+    };
+
+    while (running) {
+        const double frame_start = now_seconds();
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                running = false;
+            } else if (event.type == SDL_KEYDOWN) {
+                switch (event.key.keysym.sym) {
+                case SDLK_ESCAPE: running = false; break;
+                case SDLK_SPACE: speed = speed == 0 ? 1 : 0; break;
+                case SDLK_1: speed = 0; break;
+                case SDLK_2: speed = 1; break;
+                case SDLK_3: speed = 2; break;
+                case SDLK_4: speed = 3; break;
+                case SDLK_h: hud = !hud; break;
+                case SDLK_s: save(); break;
+                case SDLK_F12: shot = format("petrihd-%" PRIu64 ".png", world.tick()); break;
+                default: break;
+                }
+            }
+            const auto p = ui::pointer_from(event, width, height);
+            if (p.type == ui::Pointer::wheel && p.y < view_height) {
+                camera.target_zoom = std::clamp(p.scroll > 0 ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, 32.0f);
+            } else if (p.type == ui::Pointer::down) {
+                if (p.y >= view_height) {
+                    for (int i = 0; i < 4; ++i) {
+                        float x0, x1;
+                        button_rect(i, x0, x1);
+                        if (p.x >= x0 && p.x < x1) {
+                            speed = i;
+                        }
+                    }
+                    continue;
+                }
+                held[p.id] = p;
+                dragging = held.size() == 1;
+                drag_x = p.x;
+                drag_y = p.y;
+                if (held.size() == 2) {
+                    const auto a = held.begin()->second, b = std::next(held.begin())->second;
+                    pinch_start = std::hypot(a.x - b.x, a.y - b.y);
+                }
+            } else if (p.type == ui::Pointer::move && held.count(p.id)) {
+                held[p.id] = p;
+                if (held.size() == 1 && dragging) {
+                    camera.x -= (p.x - drag_x) / camera.zoom;
+                    camera.y -= (p.y - drag_y) / camera.zoom;
+                    drag_x = p.x;
+                    drag_y = p.y;
+                    clamp_camera();
+                } else if (held.size() == 2 && pinch_start > 0) {
+                    const auto a = held.begin()->second, b = std::next(held.begin())->second;
+                    const float distance = std::hypot(a.x - b.x, a.y - b.y);
+                    if (distance > pinch_start * 1.5f || distance < pinch_start / 1.5f) {
+                        const bool in = distance > pinch_start;
+                        camera.target_zoom = std::clamp(in ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, 32.0f);
+                        pinch_start = distance;
+                    }
+                }
+            } else if (p.type == ui::Pointer::up) {
+                held.erase(p.id);
+                dragging = false;
+                if (held.size() == 1) {
+                    drag_x = held.begin()->second.x;
+                    drag_y = held.begin()->second.y;
+                    dragging = true;
+                }
+            }
+        }
+
+        // Smooth zoom toward the integer target, about the view's center or
+        // the pointer.
+        if (camera.zoom != camera.target_zoom) {
+            float sx = float(width) / 2, sy = float(view_height) / 2;
+            int mx = 0, my = 0;
+            SDL_GetMouseState(&mx, &my);
+            if (my < view_height) {
+                sx = float(mx);
+                sy = float(my);
+            }
+            float next = camera.zoom * std::pow(camera.target_zoom / camera.zoom, 0.25f);
+            if (std::fabs(next - camera.target_zoom) < 0.02f) {
+                next = camera.target_zoom;
+            }
+            zoom_at(next, sx, sy);
+        }
+
+        // Simulation.
+        const double dt = std::min(0.25, frame_start - last_frame);
+        last_frame = frame_start;
+        int ticks = 0;
+        if (speeds[speed].multiplier > 0) {
+            accumulator += dt * ticks_per_second * speeds[speed].multiplier;
+            ticks = int(accumulator);
+            accumulator -= ticks;
+        } else {
+            accumulator = 0;
+        }
+        const double sim_start = now_seconds();
+        const bool flat_out = speeds[speed].multiplier < 0;
+        int done = 0;
+        while (flat_out ? now_seconds() - sim_start < 0.010 : done < ticks) {
+            world.step();
+            ++done;
+        }
+        if (done) {
+            const double ms = (now_seconds() - sim_start) * 1000.0 / done;
+            tick_ms = tick_ms == 0 ? ms : tick_ms * 0.9 + ms * 0.1;
+            phd::world_rgb(world, rgb);
+            gfx::update_texture(world_texture, gl::RGB, rgb.data());
+        }
+        if (frame_start - last_save > autosave_seconds) {
+            save();
+        }
+
+        // Drawing.
+        int drawable_w = width, drawable_h = height;
+        SDL_GL_GetDrawableSize(window, &drawable_w, &drawable_h);
+        gl::Viewport(0, 0, drawable_w, drawable_h);
+        gl::ClearColor(0.04f, 0.05f, 0.05f, 1);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+        batch.begin(width, height);
+        const float x0 = -camera.x * camera.zoom, y0 = -camera.y * camera.zoom;
+        batch.quad(world_texture, x0, y0, x0 + world.width() * camera.zoom, y0 + world.height() * camera.zoom, 0, 0,
+                   1, 1, white);
+
+        // The control bar.
+        font.rect(batch, 0, float(view_height), float(width), float(height), {12, 15, 14, 255});
+        for (int i = 0; i < 4; ++i) {
+            float bx0, bx1;
+            button_rect(i, bx0, bx1);
+            font.rect(batch, bx0, float(view_height) + 4, bx1, float(height) - 4,
+                      i == speed ? gfx::Color{40, 80, 55, 255} : gfx::Color{30, 36, 33, 255});
+            const float tw = font.width(speeds[i].label, 2);
+            font.text(batch, (bx0 + bx1 - tw) / 2, float(view_height) + 9, speeds[i].label, 2,
+                      i == speed ? accent : dim);
+        }
+        font.text(batch, 188, float(view_height) + 9, clock_label(world.tick()), 2, white);
+        const auto right = format("SEED %u", world.seed());
+        font.text(batch, float(width) - font.width(right, 2) - 8, float(view_height) + 9, right, 2, dim);
+
+        // The budget HUD.
+        if (hud) {
+            const double pi_ms = tick_ms * pi_factor;
+            const std::string lines[] = {
+                format("TICK %.3f MS  PI~%.2f/%.0f MS", tick_ms, pi_ms, pi_tick_budget_ms),
+                format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f", frame_ms, fps, camera.target_zoom),
+                format("DRAWS %d  QUADS %d", batch.draw_calls(), batch.quads()),
+                format("SIM %.2f MB  RSS %.1f MB", world.memory_bytes() / 1048576.0, resident_bytes() / 1048576.0),
+                format("TICK %" PRIu64 "  %s", world.tick(), gl::is_es() ? "GLES" : "GL"),
+            };
+            font.rect(batch, 4, 4, 4 + 6 * 2 * 34 + 8, 4 + 5 * 18 + 6, panel);
+            for (int i = 0; i < 5; ++i) {
+                font.text(batch, 10, 10 + float(i) * 18, lines[i], 2, i == 0 && pi_ms > pi_tick_budget_ms ? warn : white);
+            }
+        }
+        if (now_seconds() < status_until) {
+            font.text(batch, float(width) - font.width(status, 2) - 10, 10, status, 2, accent);
+        }
+        batch.end();
+
+        if (!shot.empty()) {
+            const bool ok = screenshot(shot, drawable_w, drawable_h);
+            std::printf("%s %s\n", ok ? "wrote" : "could not write", shot.c_str());
+            running = running && !quit_after_shot;
+            shot.clear();
+        }
+        frame_ms = (now_seconds() - frame_start) * 1000.0;
+        SDL_GL_SwapWindow(window);
+        const double interval = now_seconds() - frame_start;
+        if (interval > 0) {
+            fps = fps * 0.95 + (1.0 / interval) * 0.05;
+        }
+    }
+
+    std::printf("%s  tick=%" PRIu64 " fingerprint=%016" PRIx64 "\n", gl_version.c_str(), world.tick(),
+                world.fingerprint());
+    SDL_GL_DeleteContext(context);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}
