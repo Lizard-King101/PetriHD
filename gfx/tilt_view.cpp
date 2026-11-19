@@ -102,8 +102,8 @@ void TiltView::build_heights(const phd::World& world) {
         const auto i = std::size_t(y) * width_ + x;
         switch (world.water(i)) {
         case phd::Water::ocean: return 0.0f;
-        case phd::Water::none: return float(world.elevation(i));
-        default: return float(world.elevation(i)) + float(world.water_depth_dm(i)) / 10;
+        case phd::Water::none: return float(world.elevation(i)) / 10;
+        default: return float(world.elevation(i) + world.water_depth_dm(i)) / 10;
         }
     };
     for (int j = 0; j <= height_; ++j) {

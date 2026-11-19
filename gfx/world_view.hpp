@@ -18,7 +18,9 @@ namespace gfx {
 // terrain texture over a heightfield (tilt_view.hpp).
 class WorldView {
 public:
-    static constexpr int chunk_cells = 32;
+    // Small enough that one chunk's bake (about 0.4 ms on the PC, perhaps
+    // 3-4 ms on the Pi) never takes a frame by itself.
+    static constexpr int chunk_cells = 16;
 
     bool init(const phd::World& world);
     // Bakes chunks for up to `budget` seconds, those on screen first.
@@ -37,10 +39,12 @@ private:
     void bake_chunk(const phd::World& world, const art::Sun& sun, int chunk);
     void update_sky(const phd::World& world);
 
-    Texture terrain_, clouds_, fog_;
+    // The terrain at 4 texels per cell, and averaged down to 2 and 1, so the
+    // zoomed-out view samples one texel per pixel and small things don't blink.
+    Texture terrain_, terrain_half_, terrain_quarter_, clouds_, fog_;
     int chunks_x_ = 0, chunks_y_ = 0, next_ = 0;
     bool shaded_ = true;
-    std::vector<std::uint8_t> chunk_rgb_, cloud_rgba_, fog_rgba_;
+    std::vector<std::uint8_t> chunk_rgb_, half_rgb_, quarter_rgb_, cloud_rgba_, fog_rgba_;
     std::vector<int> visible_;
     double bake_ms_ = 0;
     int chunks_last_ = 0;

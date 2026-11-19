@@ -25,9 +25,9 @@ Sun sun_for(const phd::World& world);
 void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
           bool hill_shade = true);
 
-// How steep slopes look in the hill shading: metres of rise per cell are
-// divided by this. The tilted view lights by the same rule.
-constexpr float shade_metres = 30.0f;
+// Hill shading uses the land's true slopes: metres of rise over the 1.5 m
+// width of a cell. The tilted view lights by the same rule.
+constexpr float shade_metres = float(phd::cell_decimetres) / 10.0f;
 
 // The whole world, for screenshots.
 void bake_all(const phd::World& world, std::vector<std::uint8_t>& rgb, int& width, int& height);

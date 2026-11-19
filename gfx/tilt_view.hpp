@@ -25,9 +25,9 @@ class TiltView {
 public:
     static constexpr int chunk_cells = 32;
 
-    // Display height: cells of height per metre of elevation. A diorama scale:
-    // a 2,000 m peak stands 16 cells tall.
-    explicit TiltView(float cells_per_metre = 0.008f) : relief_(cells_per_metre) {}
+    // Display height: cells of height per metre of elevation. True scale is
+    // one cell per 1.5 m.
+    explicit TiltView(float cells_per_metre = 10.0f / float(phd::cell_decimetres)) : relief_(cells_per_metre) {}
 
     bool init(const phd::World& world);
     void refresh(const phd::World& world, int chunks); // re-height this many chunks

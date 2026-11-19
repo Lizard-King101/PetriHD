@@ -20,7 +20,11 @@ bool WorldView::init(const phd::World& world) {
     chunks_x_ = (world.width() + chunk_cells - 1) / chunk_cells;
     chunks_y_ = (world.height() + chunk_cells - 1) / chunk_cells;
     chunk_rgb_.resize(std::size_t(chunk_cells * tpc) * chunk_cells * tpc * 3);
+    half_rgb_.resize(chunk_rgb_.size() / 4);
+    quarter_rgb_.resize(chunk_rgb_.size() / 16);
     terrain_ = make_texture(world.width() * tpc, world.height() * tpc, gl::RGB, nullptr);
+    terrain_half_ = make_texture(world.width() * tpc / 2, world.height() * tpc / 2, gl::RGB, nullptr);
+    terrain_quarter_ = make_texture(world.width(), world.height(), gl::RGB, nullptr);
     cloud_rgba_.assign(std::size_t(world.nodes_x()) * world.nodes_y() * 4, 255);
     fog_rgba_ = cloud_rgba_;
     clouds_ = make_texture(world.nodes_x(), world.nodes_y(), gl::RGBA, cloud_rgba_.data(), true);
@@ -36,6 +40,21 @@ void WorldView::bake_chunk(const phd::World& world, const art::Sun& sun, int chu
     const int h = std::min(chunk_cells, world.height() - cy * chunk_cells) * tpc;
     art::bake(world, sun, tx, ty, w, h, chunk_rgb_.data(), w * 3, shaded_);
     update_texture_region(terrain_, tx, ty, w, h, gl::RGB, chunk_rgb_.data());
+    // Box-filter down by two, twice.
+    const auto halve = [](const std::uint8_t* from, int fw, int fh, std::uint8_t* to) {
+        for (int y = 0; y < fh / 2; ++y) {
+            for (int x = 0; x < fw / 2; ++x) {
+                for (int c = 0; c < 3; ++c) {
+                    const auto at = [&](int dx, int dy) { return int(from[(std::size_t(2 * y + dy) * fw + 2 * x + dx) * 3 + c]); };
+                    to[(std::size_t(y) * (fw / 2) + x) * 3 + c] = std::uint8_t((at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1) + 2) / 4);
+                }
+            }
+        }
+    };
+    halve(chunk_rgb_.data(), w, h, half_rgb_.data());
+    update_texture_region(terrain_half_, tx / 2, ty / 2, w / 2, h / 2, gl::RGB, half_rgb_.data());
+    halve(half_rgb_.data(), w / 2, h / 2, quarter_rgb_.data());
+    update_texture_region(terrain_quarter_, tx / 4, ty / 4, w / 4, h / 4, gl::RGB, quarter_rgb_.data());
 }
 
 void WorldView::bake_everything(const phd::World& world) {
@@ -117,7 +136,9 @@ void WorldView::draw(Batch& batch, const Font& font, const phd::World& world, co
 
     std::uint8_t tint[3];
     art::day_tint(world, tint);
-    batch.quad(terrain_, sx(0), sy(0), sx(ww), sy(wh), 0, 0, 1, 1, {tint[0], tint[1], tint[2], 255});
+    // The level with about one texel per pixel.
+    const Texture& level = zoom >= 3 ? terrain_ : zoom >= 1.5f ? terrain_half_ : terrain_quarter_;
+    batch.quad(level, sx(0), sy(0), sx(ww), sy(wh), 0, 0, 1, 1, {tint[0], tint[1], tint[2], 255});
 
     // Cloud shadows fall away from the sun; by night there are none to see.
     const auto sun = art::sun_for(world);

@@ -87,12 +87,37 @@ void test_land_and_water() {
         CHECK(terrain.filled[i] >= terrain.elevation[i]);
     }
     const auto percent = 100 * ocean / n;
-    CHECK(percent >= 30 && percent <= 40); // asked for 38, minus inland seas that count as lakes
+    CHECK(percent >= 8 && percent <= 26); // asked for 20; the sea stops short of flooding an inland basin
     CHECK(rivers > 100);
     CHECK(terrain.order.size() == n);
-    // The north is colder than the south, and the mountains than the plains.
-    CHECK(world.mean_temperature(0, 0) < world.mean_temperature(world.height() - 1, 0));
-    CHECK(world.mean_temperature(100, 2000) < world.mean_temperature(100, 0));
+    // Over the year, slopes facing the sun are warmer than slopes facing
+    // away; on a still night (the world starts at midnight) cold air pools in
+    // the hollows.
+    std::int64_t sunny = 0, shaded = 0, hollows = 0, rises = 0;
+    std::size_t sunny_n = 0, shaded_n = 0, hollows_n = 0, rises_n = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (terrain.ocean[i]) {
+            continue;
+        }
+        const int t = world.mean_temperature(i);
+        if (terrain.aspect[i] > 8) {
+            sunny += t;
+            ++sunny_n;
+        } else if (terrain.aspect[i] < -8) {
+            shaded += t;
+            ++shaded_n;
+        }
+        if (terrain.hollow[i] > 30) {
+            hollows += world.temperature(i);
+            ++hollows_n;
+        } else if (terrain.hollow[i] < -30) {
+            rises += world.temperature(i);
+            ++rises_n;
+        }
+    }
+    CHECK(sunny_n && shaded_n && hollows_n && rises_n);
+    CHECK(sunny * std::int64_t(shaded_n) > shaded * std::int64_t(sunny_n));
+    CHECK(hollows * std::int64_t(rises_n) < rises * std::int64_t(hollows_n));
 
     // Through a year: snow in the northern winter, rain somewhere, light
     // that comes and goes each day.
@@ -160,7 +185,7 @@ void test_files() {
 // The fingerprint after 2,400 ticks on seed 1. It must match on every
 // platform and build (x86, aarch64, NEON or not). If a change to the world is
 // meant to change it, update it in the same commit and say why.
-constexpr std::uint64_t golden_seed1_t2400 = 0x71afd5f6a283b7aaull;
+constexpr std::uint64_t golden_seed1_t2400 = 0x6c720533d40bf40bull;
 
 void test_golden() {
     const auto value = run(1, 2400).fingerprint();

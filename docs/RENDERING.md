@@ -5,17 +5,28 @@
 
 ## Scale
 
-A simulation cell is about 1–2 m across: a creature is 0.2–3 cells long and
-the world is a valley a few hundred metres wide. Elevation stays in metres
-for the climate (temperature lapse, rain shadows), but it is drawn at a
-diorama scale: `--relief`, by default 0.008 cells of height per metre, so a
-2,000 m peak stands 16 cells tall. Nothing in the simulation depends on
-either number.
+A cell is 1.5 m across (`phd::cell_decimetres`): a creature is 0.2–3 cells
+long, and the world is a valley about 580 × 340 m running down to the sea.
+Heights are in decimetres, mostly 0–50 m, and are drawn at true scale
+(`--relief`, by default one cell of height per 1.5 m). Hill shading uses the
+true slopes too.
+
+![Seed 1: a valley running down to the sea in the west](images/valley_seed1.png)
 
 ## Two paths, one texture
 
 The terrain is baked on the CPU at 4 texels per cell (`gfx/terrain_art.cpp`),
-a few 32-cell chunks per frame within 3 ms, those on screen first.
+16-cell chunks at a time within 3 ms per frame, those on screen first.
+Each chunk is also averaged down to 2 texels and 1 texel per cell; the
+zoomed-out view draws whichever level gives about one texel per pixel, so
+small things like tree crowns don't flicker in and out as the camera moves.
+
+- **Ground and plants are separate layers.** The ground's colour comes from
+  what it's made of (loam, sand, clay, peat, rock or gravel) and how wet it
+  is. Low plants cover it in patches, as much as the biome allows. Trees are
+  round crowns rooted at fixed spots in each cell, lit like domes and casting
+  shadows, drawn over whatever ground they stand on. Until milestone 2 has
+  plants of their own, the biome decides what grows.
 
 | Zoom (px per cell) | Path | Pitch |
 | --- | --- | --- |

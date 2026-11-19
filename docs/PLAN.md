@@ -132,8 +132,13 @@ per cell.
 
 ### Land and water
 
-- **Terrain:** a generated height map with mountains, hills, plains, coasts
-  and islands. Height sets temperature and drainage.
+- **Scale:** a cell is about 1.5 m, so the world is a valley a few hundred
+  metres across, running down to the sea on one side, and creatures are
+  roughly one cell long.
+- **Terrain:** a generated height map of rolling hills, rocky ridges and
+  outcrops, carved by its own streams, with walls on the landward edges.
+  The ground is loam, sand, clay, peat, rock or gravel, which sets how it
+  drains and what grows.
 - **Water:** ocean below sea level; lakes fill basins; rivers follow flow
   accumulation down the height map, which is Petri's watershed idea at full
   scale. Water levels rise in wet seasons and fall in dry ones, so
@@ -172,9 +177,10 @@ per cell.
 
 - **Day and night:** a day lasts 240 ticks. Light sets plant growth and what
   eyes can see, so night favors smell, hearing and glowing signals.
-- **Seasons:** a year is 16 days. Temperature and rain follow it, scaled by
-  height and latitude, so the north can have snow while the south has a dry
-  season.
+- **Seasons:** a year is 16 days. The valley has one climate, with a strong
+  swing between summer and winter; the land makes the local differences.
+  Slopes facing the sun are warmer and lose their snow first, cold air pools
+  in hollows at night, and water swings less than land.
 - **Weather:** moving storm fronts, as in Petri, now with wind direction,
   cloud cover, lightning, fog, drought and snow.
 - **Fire:** lightning in dry seasons starts fires. They spread through dry

@@ -15,7 +15,11 @@ struct WorldConfig {
     std::uint32_t seed = 1;
     int width = 384;
     int height = 224;
-    int ocean_percent = 38;
+    int ocean_percent = 20;
+    // The valley's climate: mean temperature over the year and the swing
+    // between summer and winter, in tenths of a degree C.
+    int climate = 90;
+    int seasons = 140;
 };
 
 enum class Water : std::uint8_t { none, ocean, lake, river };
@@ -49,7 +53,7 @@ public:
     static constexpr int days_per_year = 16;
     static constexpr int ticks_per_year = ticks_per_day * days_per_year;
     static constexpr int node = 8; // cells per weather node
-    static constexpr int max_fronts = 16;
+    static constexpr int max_fronts = 6;
     static constexpr int lightning_kept = 16;
 
     explicit World(const WorldConfig& config);
@@ -73,7 +77,8 @@ public:
 
     // The static land.
     const Terrain& terrain() const { return terrain_; }
-    int elevation(std::size_t i) const { return terrain_.elevation[i]; }
+    int elevation(std::size_t i) const { return terrain_.elevation[i]; } // decimetres
+    Substrate substrate(std::size_t i) const { return Substrate(terrain_.substrate[i]); }
 
     // The climate and water, per cell.
     Water water(std::size_t i) const { return Water(water_[i]); }
@@ -98,16 +103,17 @@ public:
     const std::array<Lightning, lightning_kept>& lightning() const { return lightning_; }
     const std::vector<LakeState>& lakes() const { return lakes_; }
 
-    // The annual-mean temperature of a cell at sea level and height, without
-    // season or day: what the biome follows.
-    int mean_temperature(int y, int metres) const;
+    // A cell's temperature over the year, without season or day: the valley's
+    // climate, a little colder up high and in hollows, warmer on slopes
+    // facing the sun. What the biome follows.
+    int mean_temperature(std::size_t i) const;
 
     std::vector<std::uint8_t> save() const;
     // Returns false and leaves the world unchanged if the data isn't a valid save.
     bool load(const std::uint8_t* data, std::size_t size);
 
 private:
-    int temperature_at(int y, int metres, bool water) const;
+    int temperature_at(std::size_t i, bool water) const;
     int rain_at(int x, int y) const;
     void update_wind();
     void update_fronts();

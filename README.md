@@ -4,9 +4,9 @@ An evolving world of plants and animals for a Raspberry Pi 3 B+ with a 7"
 touchscreen, the successor to [Petri](https://github.com/Lizard-King101/Petri).
 The design is in [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** milestone 1, land and water. A generated world of mountains,
-coasts, rivers and lakes, with seasons, day and night, storm fronts, rain,
-snow and 26 biomes. No plants or animals yet.
+**Status:** milestone 1, land and water. A generated valley running down to
+the sea, with hills, streams, ponds, seasons, day and night, storm fronts,
+rain and snow. No plants or animals yet.
 
 ## Build
 

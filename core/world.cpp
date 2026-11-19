@@ -17,12 +17,13 @@ constexpr int soil_stagger = 4;
 constexpr int biome_stagger = 16;
 constexpr int hydrology_every = 8;
 
-constexpr int soil_capacity = 230;
-constexpr std::uint32_t river_min_flow = 900;
+// How much water each ground holds before the rest runs off.
+constexpr int soil_capacity[int(Substrate::count)] = {230, 150, 245, 255, 90, 120}; // loam, sand, clay, peat, rock, gravel
+constexpr std::uint32_t river_min_flow = 3000;
 constexpr int lake_start_level = 700;
 
 constexpr char save_magic[4] = {'P', 'H', 'D', 'W'};
-constexpr std::uint32_t save_version = 2;
+constexpr std::uint32_t save_version = 3;
 
 // Little-endian serialisation of integers and arrays of them.
 struct Writer {
@@ -107,7 +108,7 @@ World::World(const WorldConfig& config)
             soil_[i] = static_cast<std::uint8_t>(guess);
             moisture_[i] = static_cast<std::uint16_t>(guess << 8);
             nutrients_[i] = static_cast<std::uint8_t>(value_noise(x, y, 24, soil_salt + 1) >> 8);
-            temperature_[i] = static_cast<std::int16_t>(temperature_at(y, terrain_.elevation[i], terrain_.ocean[i]));
+            temperature_[i] = static_cast<std::int16_t>(temperature_at(i, terrain_.ocean[i]));
         }
     }
     // Let the baseflow carve rivers, then settle the biomes.
@@ -125,20 +126,22 @@ int World::daylight() const {
     return std::clamp((sun + 200) * 255 / 1224, 0, 255);
 }
 
-int World::mean_temperature(int y, int metres) const {
-    const int latitude = y * 1024 / std::max(1, config_.height - 1);
-    return -60 + latitude * 340 / 1024 - std::max(metres, 0) * 65 / 1000;
+int World::mean_temperature(std::size_t i) const {
+    const int dm = std::max<int>(terrain_.elevation[i], 0);
+    return config_.climate - dm / 50 + terrain_.aspect[i] / 2 - std::max<int>(terrain_.hollow[i], 0) / 8;
 }
 
-int World::temperature_at(int y, int metres, bool water) const {
-    const int latitude = y * 1024 / std::max(1, config_.height - 1);
-    int swing = 140 - latitude * 100 / 1024;
-    if (water) {
-        swing /= 2;
-    }
-    const int seasonal = isin(season_angle()) * swing / 1024;
-    const int daily = -icos(day_angle()) * 25 / 1024;
-    return mean_temperature(y, metres) + seasonal + daily;
+int World::temperature_at(std::size_t i, bool water) const {
+    // One climate for the valley; the land itself makes the differences.
+    // Water swings half as much as land.
+    const int damp = water ? 2 : 1;
+    const int seasonal = isin(season_angle()) * config_.seasons / 1024 / damp;
+    const int night = std::max(0, icos(day_angle())); // 0 by day, up to 1024 at midnight
+    const int daily = -icos(day_angle()) * 60 / 1024 / damp;
+    // By day, slopes facing the sun warm; by night, cold air drains into hollows.
+    const int sun = terrain_.aspect[i] * daylight() / 128;
+    const int pooling = -std::max<int>(terrain_.hollow[i], 0) * night / 2048;
+    return mean_temperature(i) + seasonal + daily + sun + pooling;
 }
 
 void World::step() {
@@ -171,8 +174,9 @@ void World::update_fronts() {
     std::fill(cloud_.begin(), cloud_.end(), 0);
     const int w = config_.width, h = config_.height;
 
-    // Wetter springs and autumns, drier summers and winters.
-    const int chance = 10 + (icos(2 * season_angle()) + 1024) * 14 / 2048;
+    // Wetter springs and autumns, drier summers and winters. A front is
+    // bigger than much of the valley: its edges and paths are what vary.
+    const int chance = 5 + (icos(2 * season_angle()) + 1024) * 8 / 2048;
     if (int(fronts_.size()) < max_fronts && int(weather_rng_.below(1024)) < chance) {
         int x = 0, y = 0;
         for (int attempt = 0; attempt < 6; ++attempt) {
@@ -185,9 +189,9 @@ void World::update_fronts() {
         Front front{};
         front.x = x * 256 + 128;
         front.y = y * 256 + 128;
-        front.radius = static_cast<std::uint16_t>(10 + weather_rng_.below(18));
-        front.life = static_cast<std::uint16_t>(300 + weather_rng_.below(500));
-        front.load = std::int32_t(3000 + weather_rng_.below(6000));
+        front.radius = static_cast<std::uint16_t>(50 + weather_rng_.below(110));
+        front.life = static_cast<std::uint16_t>(400 + weather_rng_.below(700));
+        front.load = std::int32_t(5000 + weather_rng_.below(9000));
         front.vx = static_cast<std::int16_t>(int(weather_rng_.below(17)) - 8);
         front.vy = static_cast<std::int16_t>(int(weather_rng_.below(17)) - 8);
         front.last_height = terrain_.elevation[std::size_t(y) * w + x];
@@ -209,13 +213,13 @@ void World::update_fronts() {
         const auto centre = std::size_t(std::clamp(cy, 0, h - 1)) * w + std::size_t(std::clamp(cx, 0, w - 1));
         const bool over_sea = terrain_.ocean[centre];
         if (over_sea) {
-            front.load = std::min(front.load + 8, 12000);
+            front.load = std::min(front.load + 12, 16000);
         }
         // Rising air rains harder: the windward side of mountains is wet and
         // the far side lies in a rain shadow.
-        const int uplift = std::clamp(terrain_.elevation[centre] - front.last_height, 0, 400);
+        const int uplift = std::clamp(terrain_.elevation[centre] - front.last_height, 0, 100);
         front.last_height = terrain_.elevation[centre];
-        const int boost = 256 + uplift * 4;
+        const int boost = 256 + uplift * 6;
 
         int spent = 0;
         const int r2 = r * r;
@@ -234,13 +238,13 @@ void World::update_fronts() {
                 cloud_[at] = static_cast<std::uint8_t>(
                     std::min(255, cloud_[at] + weight * std::min(front.load, 6000) / 6000));
                 if (front.load > 800) {
-                    const int rain = int(std::int64_t(weight) * front.load / 32768 * boost / 256);
+                    const int rain = int(std::int64_t(weight) * front.load / 98304 * boost / 256);
                     rain_[at] = static_cast<std::uint8_t>(std::min(255, rain_[at] + rain));
                     spent += rain;
                 }
             }
         }
-        front.load -= spent / 12;
+        front.load -= spent / 40;
 
         if (!over_sea && front.load > 4000 && int(weather_rng_.below(4096)) < (front.load - 3000) / 300) {
             const int lx = cx + int(weather_rng_.below(std::uint32_t(r + 1))) - r / 2;
@@ -271,9 +275,8 @@ void World::update_soil(int y) {
     const auto salt = std::uint32_t(tick_) ^ stream_seed(config_.seed, purpose_soil);
     for (int x = 0; x < w; ++x) {
         const auto i = std::size_t(y) * w + x;
-        const int metres = terrain_.elevation[i];
         const auto kind = Water(water_[i]);
-        const int t = temperature_at(y, metres, kind == Water::ocean || kind == Water::lake);
+        const int t = temperature_at(i, kind == Water::ocean || kind == Water::lake);
         temperature_[i] = static_cast<std::int16_t>(t);
         if (kind == Water::ocean) {
             soil_[i] = 255;
@@ -313,9 +316,10 @@ void World::update_soil(int y) {
             soil += 2;
         }
         soil = std::max(soil, 0);
-        if (soil > soil_capacity) {
-            runoff_[i] += std::uint32_t(soil - soil_capacity);
-            soil = soil_capacity;
+        const int capacity = soil_capacity[terrain_.substrate[i]];
+        if (soil > capacity) {
+            runoff_[i] += std::uint32_t(soil - capacity);
+            soil = capacity;
         }
         soil_[i] = static_cast<std::uint8_t>(soil);
         snow_[i] = static_cast<std::uint8_t>(snow);
@@ -368,29 +372,60 @@ void World::update_hydrology() {
 
 void World::refresh_water() {
     const auto n = cells();
+    const int w = config_.width, h = config_.height;
     std::fill(lake_area_.begin(), lake_area_.end(), 0);
     for (std::size_t i = 0; i < n; ++i) {
-        const int metres = terrain_.elevation[i];
+        const int dm = terrain_.elevation[i];
         Water kind = Water::none;
         int depth = 0;
         if (terrain_.ocean[i]) {
             kind = Water::ocean;
-            depth = -metres * 10;
+            depth = -dm;
         } else if (const auto id = terrain_.basin[i]) {
             const auto& basin = terrain_.basins[id];
-            const int surface = basin.bottom * 10 + (basin.spill - basin.bottom) * 10 * lakes_[id].level / 1024;
-            if (surface > metres * 10) {
+            const int surface = basin.bottom + (basin.spill - basin.bottom) * lakes_[id].level / 1024;
+            if (surface > dm) {
                 kind = Water::lake;
-                depth = surface - metres * 10;
+                depth = surface - dm;
                 ++lake_area_[id];
             }
         }
-        if (kind == Water::none && flow_[i] > river_min_flow) {
-            kind = Water::river;
-            depth = std::min<int>(80, 3 + int(isqrt(flow_[i] - river_min_flow)) / 3);
-        }
         water_[i] = std::uint8_t(kind);
         depth_[i] = static_cast<std::uint16_t>(std::clamp(depth, 0, 65535));
+    }
+    // Streams: a channel where enough water flows, widening downstream. The
+    // banks beside a wide channel flood too, if they are no higher than its
+    // surface.
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const auto i = std::size_t(y) * w + x;
+            if (Water(water_[i]) != Water::none || flow_[i] <= river_min_flow) {
+                continue;
+            }
+            const int extra = int(isqrt(flow_[i] - river_min_flow));
+            const int depth = std::min(25, 3 + extra / 6);
+            const int radius = std::min(2, extra / 40);
+            const int surface = terrain_.elevation[i] + depth;
+            if (Water(water_[i]) == Water::none) {
+                water_[i] = std::uint8_t(Water::river);
+                depth_[i] = static_cast<std::uint16_t>(depth);
+            }
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int nx = x + dx, ny = y + dy;
+                    if ((dx == 0 && dy == 0) || dx * dx + dy * dy > radius * radius + 1 || nx < 0 || ny < 0 || nx >= w ||
+                        ny >= h) {
+                        continue;
+                    }
+                    const auto j = std::size_t(ny) * w + nx;
+                    const int bank = surface - terrain_.elevation[j];
+                    if (Water(water_[j]) == Water::none && bank > 0) {
+                        water_[j] = std::uint8_t(Water::river);
+                        depth_[j] = static_cast<std::uint16_t>(std::min(bank, depth));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -405,13 +440,13 @@ Biome World::classify(int x, int y) const {
     const auto i = std::size_t(y) * w + x;
     const auto kind = Water(water_[i]);
     const int depth = depth_[i];
-    const int metres = terrain_.elevation[i];
-    const int t = mean_temperature(y, metres);
+    const int dm = terrain_.elevation[i];
+    const int t = mean_temperature(i);
     if (kind == Water::ocean) {
-        if (depth > 600) {
+        if (depth > 150) {
             return Biome::deep_sea;
         }
-        if (depth > 80) {
+        if (depth > 40) {
             return Biome::open_sea;
         }
         return t >= 200 ? Biome::reef_shallows : Biome::tidal_shallows;
@@ -423,6 +458,7 @@ Biome World::classify(int x, int y) const {
         return Biome::river;
     }
     const int m = moisture_[i] >> 8;
+    const auto ground = Substrate(terrain_.substrate[i]);
     const auto next_to = [&](Water want) {
         const int dx[] = {1, -1, 0, 0}, dy[] = {0, 0, 1, -1};
         for (int k = 0; k < 4; ++k) {
@@ -434,30 +470,29 @@ Biome World::classify(int x, int y) const {
         }
         return false;
     };
-    if (metres > 1900 || (metres > 1300 && t < -40)) {
-        return Biome::bare_peaks;
-    }
-    if (metres > 1300) {
-        return Biome::alpine_meadow;
+    if (ground == Substrate::rock) {
+        return Biome::bare_peaks; // rock outcrops and scree
     }
     if (t < -60) {
         return Biome::ice;
     }
-    const bool coastal = terrain_.coast[i];
-    if (coastal && metres < 6 && m < 190) {
+    if (ground == Substrate::sand && (terrain_.coast[i] || terrain_.sea_distance[i] <= 4)) {
         return Biome::beach;
     }
-    if (m >= 190 && metres < 150) {
-        if (t < 50) {
+    if (m >= 190 || (ground == Substrate::peat && m >= 150)) {
+        if (ground == Substrate::peat || t < 50) {
             return Biome::bog;
         }
-        if (coastal && t >= 200) {
+        if (terrain_.coast[i] && t >= 200) {
             return Biome::mangrove;
         }
         return t < 180 ? Biome::marsh : Biome::swamp;
     }
     if (m >= 120 && (next_to(Water::river) || next_to(Water::lake))) {
         return Biome::riverbank;
+    }
+    if (dm > 380 && t < 150 && m < 150) {
+        return Biome::alpine_meadow; // the windswept tops of the hills
     }
     if (t < 0) {
         return Biome::tundra;
@@ -466,16 +501,16 @@ Biome World::classify(int x, int y) const {
         return m >= 90 ? Biome::taiga : Biome::tundra;
     }
     if (t < 190) {
-        if (m < 50) {
+        if (m < 50 || ground == Substrate::gravel) {
             return Biome::scrubland;
         }
         if (m < 85) {
-            return t < 120 ? Biome::heath : Biome::grassland;
+            return t < 120 || ground == Substrate::sand ? Biome::heath : Biome::grassland;
         }
         return m < 130 ? Biome::grassland : Biome::deciduous_forest;
     }
     if (m < 35) {
-        return terrain_.filled[i] > metres || metres < 30 ? Biome::salt_flat : Biome::desert;
+        return ground == Substrate::clay || terrain_.filled[i] > dm ? Biome::salt_flat : Biome::desert;
     }
     if (m < 60) {
         return Biome::desert;
@@ -492,6 +527,8 @@ std::uint64_t World::fingerprint() const {
     hash.add(std::uint32_t(config_.width));
     hash.add(std::uint32_t(config_.height));
     hash.add(std::uint32_t(config_.ocean_percent));
+    hash.add(config_.climate);
+    hash.add(config_.seasons);
     hash.add(tick_);
     hash.add(weather_rng_.state());
     hash.add(std::uint32_t(wind_angle_));
@@ -537,7 +574,8 @@ std::size_t World::memory_bytes() const {
     const auto bytes = [](const auto& v) { return v.capacity() * sizeof(v[0]); };
     return sizeof(*this) + bytes(terrain_.elevation) + bytes(terrain_.filled) + bytes(terrain_.downstream) +
            bytes(terrain_.order) + bytes(terrain_.basin) + bytes(terrain_.basins) + bytes(terrain_.ocean) +
-           bytes(terrain_.coast) + bytes(terrain_.sea_distance) + bytes(water_) + bytes(depth_) +
+           bytes(terrain_.coast) + bytes(terrain_.sea_distance) + bytes(terrain_.substrate) + bytes(terrain_.hollow) +
+           bytes(terrain_.aspect) + bytes(terrain_.slope) + bytes(water_) + bytes(depth_) +
            bytes(temperature_) + bytes(soil_) + bytes(moisture_) + bytes(snow_) + bytes(nutrients_) +
            bytes(runoff_) + bytes(flow_) + bytes(biome_) + bytes(lakes_) + fronts_.capacity() * sizeof(Front) +
            bytes(rain_) + bytes(cloud_) + bytes(accumulated_);
@@ -554,6 +592,8 @@ std::vector<std::uint8_t> World::save() const {
     w.put(std::uint32_t(config_.width));
     w.put(std::uint32_t(config_.height));
     w.put(std::uint32_t(config_.ocean_percent));
+    w.put(config_.climate);
+    w.put(config_.seasons);
     w.put(tick_);
     w.put(weather_rng_.state());
     w.put(std::uint32_t(wind_angle_));
@@ -611,6 +651,8 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
     config.width = int(r.get<std::uint32_t>());
     config.height = int(r.get<std::uint32_t>());
     config.ocean_percent = int(r.get<std::uint32_t>());
+    config.climate = r.get<std::int32_t>();
+    config.seasons = r.get<std::int32_t>();
     if (!r.ok || config.width <= 0 || config.height <= 0 || config.width > 4096 || config.height > 4096) {
         return false;
     }

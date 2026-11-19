@@ -96,6 +96,11 @@ constexpr float panel_width = 260;
 constexpr double long_press_seconds = 0.45;
 constexpr double bake_budget_seconds = 0.003;
 
+const char* substrate_name(phd::Substrate s) {
+    static const char* names[] = {"LOAM", "SAND", "CLAY", "PEAT", "ROCK", "GRAVEL"};
+    return names[int(s)];
+}
+
 const char* water_name(phd::Water kind) {
     switch (kind) {
     case phd::Water::ocean: return "SEA";
@@ -151,7 +156,7 @@ int main(int argc, char** argv) {
     bool quit_after_shot = false;
     int bench_frames = 0, start_speed = 1;
     long long skip_ticks = 0;
-    float start_zoom = 2, relief = 0.008f, at_x = -1, at_y = -1;
+    float start_zoom = 2, relief = 10.0f / float(phd::cell_decimetres), at_x = -1, at_y = -1;
     bool tilt_enabled = true;
     int pixel = 2;
     for (int i = 1; i < argc; ++i) {
@@ -489,7 +494,7 @@ int main(int argc, char** argv) {
             const std::string lines[] = {
                 phd::biome_name(world.biome(i)),
                 format("CELL %d, %d", inspected % world.width(), inspected / world.width()),
-                format("HEIGHT %d M", world.elevation(i)),
+                format("HEIGHT %.1f M  %s", world.elevation(i) / 10.0, substrate_name(world.substrate(i))),
                 format("WATER %s %.1f M", water_name(world.water(i)), world.water_depth_dm(i) / 10.0),
                 format("TEMP %s%d.%d C", t < 0 ? "-" : "", std::abs(t) / 10, std::abs(t) % 10),
                 format("SOIL WATER %d", world.soil_water(i)),
