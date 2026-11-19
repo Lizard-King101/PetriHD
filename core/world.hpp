@@ -157,6 +157,7 @@ private:
     void update_canopy();
     void update_fire();
     int fuel(std::size_t i) const;
+    bool room_for_tree(int cell) const;
 
     WorldConfig config_;
     Terrain terrain_;

@@ -38,7 +38,29 @@ const PlantGenome& founder_genome(std::uint32_t f) {
 
 constexpr int cross_distance = 700; // genomes further apart than this can't cross
 
+// Trees need room: a woody plant can only take a whole cell if no more than
+// this many other trees stand within two cells of it. Forests still close
+// their canopy, but trunks stand a few metres apart, not in every cell.
+constexpr int tree_spacing = 2;
+constexpr int trees_nearby = 1;
+
 } // namespace
+
+bool World::room_for_tree(int cell) const {
+    const int w = config_.width, h = config_.height, cx = cell % w, cy = cell / w;
+    int near = 0;
+    for (int dy = -tree_spacing; dy <= tree_spacing; ++dy) {
+        for (int dx = -tree_spacing; dx <= tree_spacing; ++dx) {
+            const int x = cx + dx, y = cy + dy;
+            if ((dx || dy) && x >= 0 && y >= 0 && x < w && y < h && tree(std::size_t(y) * w + x)) {
+                if (++near > trees_nearby) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
 
 std::int32_t World::place(const PlantGenome& genome, std::uint32_t lineage, int cell, int slot, int height) {
     if (free_.empty()) {
@@ -145,7 +167,7 @@ void World::seed_plants() {
                 shrubs = m < 60 ? 30 : 10;
                 slots = m < 60 ? 1 : 3;
             }
-            if (tree && roll < tree_chance) {
+            if (tree && roll < tree_chance && room_for_tree(cell)) {
                 put(tree, cell, whole_cell);
                 continue;
             }
@@ -295,7 +317,7 @@ void World::grow_plant(std::uint32_t index) {
                     const auto other = occupancy_[c * 4 + std::size_t(s)];
                     clear = clear && (!other || other == index + 1);
                 }
-                if (clear) {
+                if (clear && room_for_tree(int(c))) {
                     for (int s = 0; s < 4; ++s) {
                         occupancy_[c * 4 + std::size_t(s)] = index + 1;
                     }

@@ -229,7 +229,7 @@ void test_files() {
 // The fingerprint after 2,400 ticks on seed 1. It must match on every
 // platform and build (x86, aarch64, NEON or not). If a change to the world is
 // meant to change it, update it in the same commit and say why.
-constexpr std::uint64_t golden_seed1_t2400 = 0x235906ddbb40e4edull;
+constexpr std::uint64_t golden_seed1_t2400 = 0x6d5dc4b7a824c293ull;
 
 void test_golden() {
     const auto value = run(1, 2400).fingerprint();

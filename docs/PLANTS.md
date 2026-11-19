@@ -21,7 +21,10 @@ climate and ground could support. From then on only selection decides.
 
 - **Space:** a cell has four small slots, one per quarter. A woody plant
   must take the whole cell to grow past 1.5 m, so it can only do that once
-  the plants beside it have gone; its shade usually sees to that.
+  the plants beside it have gone; its shade usually sees to that. It also
+  needs room: no more than one other tree within two cells. Forests still
+  close their canopy, but trunks stand a few metres apart, with shrubs,
+  flowers and light between them.
 - **Growth:** sunlight, less the shade of taller crowns (by how well the
   plant takes shade), times water, warmth and nutrients, less upkeep. Each
   gene that protects (deep roots, bark, drought, cold and flood tolerance)
@@ -64,30 +67,33 @@ smoke in both views.
 plant traits differ by region.*
 
 **8 seeds, 6 years each (23,040 ticks), the default temperate climate.**
-Every seed kept 100,000–190,000 plants. Forest (closed canopy) covered
-15–30% of the land and rose and fell. Six of the eight had fires; on seed 6
-one burnt about a quarter of the valley in year 2, and the forest grew back
-from 20% to 24% by year 6.
+Every seed kept 120,000–210,000 plants and 2,700–5,100 trees. Closed forest
+covered 9–17% of the land and rose and fell. Every seed had fires; on seeds
+1, 6 and 7 single fires burnt 17,000–28,000 cells (a quarter to a third of
+the valley), and seed 7's forest fell from 15% to 10% after one.
 
 Traits split by habitat (means of the gene, 0–255, in year 6):
 
 | Seed | Drought: dry land / wet land | Roots: dry / wet | Flood: wet land / in water |
 | --- | --- | --- | --- |
-| 1 | 120 / 112 | 103 / 117 | 76 / 148 |
-| 2 | 123 / 110 | 100 / 119 | 75 / 94 |
-| 3 | 127 / 111 | 94 / 134 | 56 / 150 |
-| 4 | 120 / 128 | 97 / 113 | 58 / 85 |
-| 5 | 123 / 116 | 92 / 120 | 58 / 121 |
-| 6 | 115 / 108 | 90 / 107 | 103 / 161 |
-| 7 | 119 / 114 | 91 / 118 | 70 / 133 |
-| 8 | 127 / 119 | 88 / 106 | 67 / 112 |
+| 1 | 132 / 115 | 112 / 118 | 80 / 146 |
+| 2 | 144 / 119 | 120 / 126 | 71 / 103 |
+| 3 | 145 / 117 | 111 / 134 | 55 / 146 |
+| 4 | 144 / 136 | 121 / 118 | 56 / 84 |
+| 5 | 145 / 121 | 112 / 129 | 57 / 129 |
+| 6 | 127 / 110 | 105 / 116 | 97 / 151 |
+| 7 | 122 / 102 | 97 / 109 | 99 / 127 |
+| 8 | 139 / 125 | 106 / 112 | 61 / 110 |
 
 - Plants standing in water are more flood-tolerant than those on wet land
   on all 8 seeds.
-- Dry-land plants are more drought-tolerant than wet-land ones on 7 of 8.
-- Roots are deeper on wet land on all 8: deep roots reach stored water, and
-  dry land has little stored to reach, so there they are only a cost. That
-  wasn't designed in.
+- Dry-land plants are more drought-tolerant than wet-land ones on all 8.
+- Roots are deeper on wet land on 7 of 8: deep roots reach stored water,
+  and dry land has little stored to reach, so there they are mostly a
+  cost. That wasn't designed in.
+
+The three-climate runs below predate the tree spacing rule, which lowers
+forest cover; the biomes they show are unchanged.
 
 **The same valley (seed 1) in three climates, after 5 years:**
 
