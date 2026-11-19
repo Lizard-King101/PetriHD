@@ -4,8 +4,12 @@
 //   petrihd [--seed N] [--size WxH] [--load FILE] [--shot FILE.png]
 //           [--ticks N]                (run N ticks before showing)
 //           [--frames N --speed 0-3]   (run N frames, print timings, quit)
+//           [--zoom Z] [--at X,Y]      (start zoom, 1-256, and focus cell)
+//           [--flat] [--relief K]      (no tilted view; display cells per metre)
 //
 // Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
+// T locks the camera top-down, G turns the tilted view off and on, O puts
+// the test tree and creature at the focus.
 // Long-press or right-click a cell to inspect it.
 
 #include <SDL.h>
@@ -28,6 +32,7 @@
 #include "png.hpp"
 #include "pointer.hpp"
 #include "world.hpp"
+#include "tilt_view.hpp"
 #include "world_view.hpp"
 
 namespace {
@@ -144,6 +149,8 @@ int main(int argc, char** argv) {
     bool quit_after_shot = false;
     int bench_frames = 0, start_speed = 1;
     long long skip_ticks = 0;
+    float start_zoom = 2, relief = 0.008f, at_x = -1, at_y = -1;
+    bool tilt_enabled = true;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const bool more = i + 1 < argc;
@@ -153,6 +160,13 @@ int main(int argc, char** argv) {
         } else if (arg == "--load" && more) {
             load = argv[++i];
             save_path = load;
+        } else if (arg == "--zoom" && more) {
+            start_zoom = std::clamp(float(std::atof(argv[++i])), 1.0f, 256.0f);
+        } else if (arg == "--at" && more && std::sscanf(argv[++i], "%f,%f", &at_x, &at_y) == 2) {
+        } else if (arg == "--flat") {
+            tilt_enabled = false;
+        } else if (arg == "--relief" && more) {
+            relief = float(std::atof(argv[++i]));
         } else if (arg == "--ticks" && more) {
             skip_ticks = std::atoll(argv[++i]);
         } else if (arg == "--frames" && more) {
@@ -176,6 +190,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return 1;
     }
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
     SDL_Window* window = nullptr;
     SDL_GLContext context = create_context(window, width, height);
     if (!context) {
@@ -211,26 +226,28 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    gfx::TiltView tilt(relief);
+    if (!tilt.init(world)) {
+        return 1;
+    }
+
     const int view_height = height - bar_height;
     Camera camera;
-    const auto clamp_camera = [&] {
-        const float visible_w = float(width) / camera.zoom, visible_h = float(view_height) / camera.zoom;
-        const auto axis = [](float& at, float visible, int size) {
-            at = visible >= float(size) ? (float(size) - visible) / 2 : std::clamp(at, 0.0f, float(size) - visible);
-        };
-        axis(camera.x, visible_w, world.width());
-        axis(camera.y, visible_h, world.height());
-    };
+    camera.cx = at_x >= 0 ? at_x : float(world.width()) / 2;
+    camera.cy = at_y >= 0 ? at_y : float(world.height()) / 2;
+    const auto max_zoom = [&] { return tilt_enabled ? 256.0f : 32.0f; };
+    camera.zoom = camera.target_zoom = std::min(start_zoom, max_zoom());
+    camera.focus_z = tilt.ground(camera.cx, camera.cy);
+    const auto clamp_camera = [&] { camera.clamp(float(width), float(view_height), world.width(), world.height()); };
     clamp_camera();
     const auto zoom_at = [&](float zoom, float sx, float sy) {
-        const float wx = camera.x + sx / camera.zoom, wy = camera.y + sy / camera.zoom;
-        camera.zoom = zoom;
-        camera.x = wx - sx / camera.zoom;
-        camera.y = wy - sy / camera.zoom;
+        camera.zoom_about(zoom, sx, sy, float(width), float(view_height));
         clamp_camera();
     };
+    tilt.place_test_scene(world, camera.cx, camera.cy);
 
     int speed = start_speed;
+    long long tilt_frame = 0;
     bool hud = true, running = true;
     double accumulator = 0, tick_ms = 0, frame_ms = 0, fps = 60, last_frame = now_seconds();
     double last_save = last_frame;
@@ -250,7 +267,9 @@ int main(int argc, char** argv) {
     float press_x = 0, press_y = 0;
     bool press_moved = false, press_fired = false;
     const auto cell_at = [&](float px, float py) {
-        const int cx = int(std::floor(camera.x + px / camera.zoom)), cy = int(std::floor(camera.y + py / camera.zoom));
+        float gx, gy;
+        camera.to_ground(px, py, float(width), float(view_height), gx, gy);
+        const int cx = int(std::floor(gx)), cy = int(std::floor(gy));
         return cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height() ? -1 : cy * world.width() + cx;
     };
     std::vector<double> frame_samples;
@@ -280,6 +299,12 @@ int main(int argc, char** argv) {
                 case SDLK_3: speed = 2; break;
                 case SDLK_4: speed = 3; break;
                 case SDLK_h: hud = !hud; break;
+                case SDLK_t: camera.top_down = !camera.top_down; break;
+                case SDLK_g:
+                    tilt_enabled = !tilt_enabled;
+                    camera.target_zoom = std::min(camera.target_zoom, max_zoom());
+                    break;
+                case SDLK_o: tilt.place_test_scene(world, camera.cx, camera.cy); break;
                 case SDLK_s: save(); break;
                 case SDLK_F12: shot = format("petrihd-%" PRIu64 ".png", world.tick()); break;
                 default: break;
@@ -287,7 +312,7 @@ int main(int argc, char** argv) {
             }
             const auto p = ui::pointer_from(event, width, height);
             if (p.type == ui::Pointer::wheel && p.y < view_height) {
-                camera.target_zoom = std::clamp(p.scroll > 0 ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, 32.0f);
+                camera.target_zoom = std::clamp(p.scroll > 0 ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, max_zoom());
             } else if (p.type == ui::Pointer::down) {
                 if (p.y >= view_height) {
                     for (int i = 0; i < 4; ++i) {
@@ -322,8 +347,8 @@ int main(int argc, char** argv) {
                     press_moved = true;
                 }
                 if (held.size() == 1 && dragging) {
-                    camera.x -= (p.x - drag_x) / camera.zoom;
-                    camera.y -= (p.y - drag_y) / camera.zoom;
+                    camera.cx -= (p.x - drag_x) / camera.zoom;
+                    camera.cy -= (p.y - drag_y) / (camera.zoom * camera.sin_pitch());
                     drag_x = p.x;
                     drag_y = p.y;
                     clamp_camera();
@@ -332,7 +357,7 @@ int main(int argc, char** argv) {
                     const float distance = std::hypot(a.x - b.x, a.y - b.y);
                     if (distance > pinch_start * 1.5f || distance < pinch_start / 1.5f) {
                         const bool in = distance > pinch_start;
-                        camera.target_zoom = std::clamp(in ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, 32.0f);
+                        camera.target_zoom = std::clamp(in ? camera.target_zoom * 2 : camera.target_zoom / 2, 1.0f, max_zoom());
                         pinch_start = distance;
                     }
                 }
@@ -368,11 +393,14 @@ int main(int argc, char** argv) {
                 sy = float(my);
             }
             float next = camera.zoom * std::pow(camera.target_zoom / camera.zoom, 0.25f);
-            if (std::fabs(next - camera.target_zoom) < 0.02f) {
+            if (std::fabs(next / camera.target_zoom - 1) < 0.002f) {
                 next = camera.target_zoom;
             }
             zoom_at(next, sx, sy);
         }
+
+        // Tilting turns about the ground at the focus, not sea level.
+        camera.focus_z += (tilt.ground(camera.cx, camera.cy) - camera.focus_z) * 0.2f;
 
         // Simulation.
         const double dt = std::min(0.25, frame_start - last_frame);
@@ -396,7 +424,7 @@ int main(int argc, char** argv) {
             const double ms = (now_seconds() - sim_start) * 1000.0 / done;
             tick_ms = tick_ms == 0 ? ms : tick_ms * 0.9 + ms * 0.1;
         }
-        view.refresh(world, camera, width, view_height, bake_budget_seconds);
+        view.refresh(world, camera, width, view_height, bake_budget_seconds, tilt_enabled && camera.tilted());
         if (frame_start - last_save > autosave_seconds) {
             save();
         }
@@ -406,18 +434,32 @@ int main(int argc, char** argv) {
         SDL_GL_GetDrawableSize(window, &drawable_w, &drawable_h);
         gl::Viewport(0, 0, drawable_w, drawable_h);
         gl::ClearColor(0.04f, 0.05f, 0.05f, 1);
-        gl::Clear(gl::COLOR_BUFFER_BIT);
+        gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+        const bool tilted = tilt_enabled && camera.tilted();
+        if (tilted) {
+            if (++tilt_frame % 15 == 0) {
+                tilt.refresh(world, 2);
+            }
+            tilt.draw(world, camera, view.terrain(), font, width, height, view_height, frame_start);
+        }
         batch.begin(width, height);
-        view.draw(batch, font, world, camera, width, view_height, frame_start);
+        if (!tilted) {
+            view.draw(batch, font, world, camera, width, view_height, frame_start);
+        }
         if (inspected >= 0) {
-            const float cx = (float(inspected % world.width()) - camera.x) * camera.zoom;
-            const float cy = (float(inspected / world.width()) - camera.y) * camera.zoom;
-            const float z = std::max(camera.zoom, 3.0f);
+            // Outline the cell, projected through the camera at its ground height.
+            const float x = float(inspected % world.width()), y = float(inspected / world.width());
             const gfx::Color mark{255, 240, 120, 230};
-            font.rect(batch, cx - 1, cy - 1, cx + z + 1, cy, mark);
-            font.rect(batch, cx - 1, cy + z, cx + z + 1, cy + z + 1, mark);
-            font.rect(batch, cx - 1, cy, cx, cy + z, mark);
-            font.rect(batch, cx + z, cy, cx + z + 1, cy + z, mark);
+            float px[4], py[4];
+            const float corner_x[4] = {x, x + 1, x + 1, x}, corner_y[4] = {y, y, y + 1, y + 1};
+            for (int k = 0; k < 4; ++k) {
+                const float z = tilted ? tilt.ground(corner_x[k], corner_y[k]) : camera.focus_z;
+                camera.to_screen(corner_x[k], corner_y[k], z, float(width), float(view_height), px[k], py[k]);
+            }
+            font.rect(batch, px[0] - 1, std::min(py[0], py[1]) - 1, px[1] + 1, std::min(py[0], py[1]) + 1, mark);
+            font.rect(batch, px[3] - 1, std::max(py[2], py[3]) - 1, px[2] + 1, std::max(py[2], py[3]) + 1, mark);
+            font.rect(batch, px[0] - 1, py[0], px[0] + 1, py[3], mark);
+            font.rect(batch, px[1] - 1, py[1], px[1] + 1, py[2], mark);
         }
 
         // The cell inspector.
@@ -466,12 +508,14 @@ int main(int argc, char** argv) {
             const double pi_ms = tick_ms * pi_factor;
             const std::string lines[] = {
                 format("TICK %.3f MS  PI~%.2f/%.0f MS", tick_ms, pi_ms, pi_tick_budget_ms),
-                format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f", frame_ms, fps, camera.target_zoom),
-                format("DRAWS %d  QUADS %d  BAKE %.2f MS", batch.draw_calls(), batch.quads(), view.bake_ms()),
+                format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f  PITCH %.0f%s", frame_ms, fps, camera.zoom,
+                       camera.pitch(), camera.top_down ? " LOCK" : tilt_enabled ? "" : " FLAT"),
+                format("DRAWS %d  QUADS %d  TRIS %d  BAKE %.2f MS", batch.draw_calls() + (tilted ? tilt.draw_calls() : 0),
+                       batch.quads(), tilted ? tilt.triangles() : 0, view.bake_ms()),
                 format("SIM %.2f MB  RSS %.1f MB", world.memory_bytes() / 1048576.0, resident_bytes() / 1048576.0),
                 format("FRONTS %zu  WIND %d  %s", world.fronts().size(), world.wind_speed(), gl::is_es() ? "GLES" : "GL"),
             };
-            font.rect(batch, 4, 4, 4 + 6 * 2 * 40 + 8, 4 + 5 * 18 + 6, panel);
+            font.rect(batch, 4, 4, 4 + 6 * 2 * 44 + 8, 4 + 5 * 18 + 6, panel);
             for (int i = 0; i < 5; ++i) {
                 font.text(batch, 10, 10 + float(i) * 18, lines[i], 2, i == 0 && pi_ms > pi_tick_budget_ms ? warn : white);
             }

@@ -24,6 +24,9 @@ ctest --test-dir build
   `--seed N`, `--size 1024x600`, `--load FILE`, `--ticks N` (run ahead
   first), `--shot FILE.png` (draw one frame and quit), `--frames N --speed
   0-3` (time N frames and quit).
+  Above 32 px per cell the camera tilts toward a three-quarter view (zoom up
+  to 256); T locks it top-down and G turns it off. See
+  [docs/RENDERING.md](docs/RENDERING.md).
 - `build/petrihd-run`: headless. `seed=1 ticks=3840 every=480` prints a
   census line of `key=value` pairs; `ocean=38` sets the share of sea,
   `biomes=1` lists biome shares, and `save=`, `load=` and `png=` write and

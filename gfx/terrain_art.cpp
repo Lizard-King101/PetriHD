@@ -94,7 +94,8 @@ void day_tint(const phd::World& world, std::uint8_t out[3]) {
     out[2] = std::uint8_t(c.b);
 }
 
-void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride) {
+void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
+          bool hill_shade) {
     const int cw = world.width(), ch = world.height();
     const auto& terrain = world.terrain();
     const float inv = 1.0f / float(texels_per_cell);
@@ -167,13 +168,15 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                     }
                 }
                 // Hill shading: slopes facing the sun are lit, the others shaded.
-                const float d = 0.5f;
-                const float gx = (sample(world, x + d, y, elevation) - sample(world, x - d, y, elevation)) / (2 * d);
-                const float gy = (sample(world, x, y + d, elevation) - sample(world, x, y - d, elevation)) / (2 * d);
-                const float nx = -gx / 30.0f, ny = -gy / 30.0f;
-                const float len = std::sqrt(nx * nx + ny * ny + 1);
-                const float lit = (nx * sun.x + ny * sun.y + sun.z) / len;
-                shade = std::clamp(1.0f + 1.1f * (lit - sun.z), 0.45f, 1.35f);
+                if (hill_shade) {
+                    const float d = 0.5f;
+                    const float gx = (sample(world, x + d, y, elevation) - sample(world, x - d, y, elevation)) / (2 * d);
+                    const float gy = (sample(world, x, y + d, elevation) - sample(world, x, y - d, elevation)) / (2 * d);
+                    const float nx = -gx / shade_metres, ny = -gy / shade_metres;
+                    const float len = std::sqrt(nx * nx + ny * ny + 1);
+                    const float lit = (nx * sun.x + ny * sun.y + sun.z) / len;
+                    shade = std::clamp(1.0f + 1.1f * (lit - sun.z), 0.45f, 1.35f);
+                }
             }
             out[0] = std::uint8_t(std::clamp(c.r * shade, 0.0f, 255.0f));
             out[1] = std::uint8_t(std::clamp(c.g * shade, 0.0f, 255.0f));

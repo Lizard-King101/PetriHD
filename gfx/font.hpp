@@ -20,6 +20,8 @@ public:
     float text(Batch& batch, float x, float y, const std::string& text, int scale, Color color) const;
     float width(const std::string& text, int scale) const { return float(text.size() * advance * scale); }
     void rect(Batch& batch, float x0, float y0, float x1, float y1, Color color) const;
+    // Texture coordinates of a white texel, for untextured geometry.
+    void white(float& u, float& v) const;
 
 private:
     Texture texture_;

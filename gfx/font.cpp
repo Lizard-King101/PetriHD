@@ -97,6 +97,12 @@ float Font::text(Batch& batch, float x, float y, const std::string& text, int sc
     return x;
 }
 
+void Font::white(float& u, float& v) const {
+    const int index = solid - 32;
+    u = (float((index % columns) * cell_w) + 3.0f) / atlas_size;
+    v = (float((index / columns) * cell_h) + 4.0f) / atlas_size;
+}
+
 void Font::rect(Batch& batch, float x0, float y0, float x1, float y1, Color color) const {
     const int index = solid - 32;
     const float u = (float((index % columns) * cell_w) + 3.0f) / atlas_size;

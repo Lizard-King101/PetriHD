@@ -20,8 +20,14 @@ struct Sun {
 Sun sun_for(const phd::World& world);
 
 // Bakes the texels [tx0, tx0 + w) x [ty0, ty0 + h) into rgb (3 bytes each),
-// rows `stride` bytes apart.
-void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride);
+// rows `stride` bytes apart. Without hill shading, for the tilted view,
+// which lights its own slopes.
+void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
+          bool hill_shade = true);
+
+// How steep slopes look in the hill shading: metres of rise per cell are
+// divided by this. The tilted view lights by the same rule.
+constexpr float shade_metres = 30.0f;
 
 // The whole world, for screenshots.
 void bake_all(const phd::World& world, std::vector<std::uint8_t>& rgb, int& width, int& height);

@@ -34,7 +34,7 @@ void WorldView::bake_chunk(const phd::World& world, const art::Sun& sun, int chu
     const int tx = cx * chunk_cells * tpc, ty = cy * chunk_cells * tpc;
     const int w = std::min(chunk_cells, world.width() - cx * chunk_cells) * tpc;
     const int h = std::min(chunk_cells, world.height() - cy * chunk_cells) * tpc;
-    art::bake(world, sun, tx, ty, w, h, chunk_rgb_.data(), w * 3);
+    art::bake(world, sun, tx, ty, w, h, chunk_rgb_.data(), w * 3, shaded_);
     update_texture_region(terrain_, tx, ty, w, h, gl::RGB, chunk_rgb_.data());
 }
 
@@ -45,11 +45,22 @@ void WorldView::bake_everything(const phd::World& world) {
     }
 }
 
-void WorldView::refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, double budget) {
+void WorldView::refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, double budget,
+                        bool tilted) {
     const double start = seconds();
-    const int x0 = std::max(0, int(camera.x) / chunk_cells), y0 = std::max(0, int(camera.y) / chunk_cells);
-    const int x1 = std::min(chunks_x_ - 1, int(camera.x + float(view_w) / camera.zoom) / chunk_cells);
-    const int y1 = std::min(chunks_y_ - 1, int(camera.y + float(view_h) / camera.zoom) / chunk_cells);
+    if (shaded_ == tilted) {
+        shaded_ = !tilted;
+        budget = 1.0; // everything on screen, now
+    }
+    // The cells in view: flat, a rectangle; tilted, the view reaches further
+    // north, and terrain rising from beyond its bottom edge can show too.
+    const float half_w = float(view_w) / (2 * camera.zoom);
+    const float reach = float(view_h) / (2 * camera.zoom * camera.sin_pitch());
+    const float extra = camera.tilted() ? 24.0f : 0.0f;
+    const int x0 = std::max(0, int(camera.cx - half_w) / chunk_cells);
+    const int y0 = std::max(0, int(std::max(0.0f, camera.cy - reach - extra)) / chunk_cells);
+    const int x1 = std::min(chunks_x_ - 1, int(std::max(0.0f, camera.cx + half_w)) / chunk_cells);
+    const int y1 = std::min(chunks_y_ - 1, int(std::max(0.0f, camera.cy + reach + extra / 4)) / chunk_cells);
     visible_.clear();
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
@@ -98,8 +109,9 @@ void WorldView::update_sky(const phd::World& world) {
 void WorldView::draw(Batch& batch, const Font& font, const phd::World& world, const Camera& camera, int view_w,
                      int view_h, double time) {
     const float zoom = camera.zoom;
-    const auto sx = [&](float cells) { return (cells - camera.x) * zoom; };
-    const auto sy = [&](float cells) { return (cells - camera.y) * zoom; };
+    const float left = camera.left(float(view_w)), top = camera.top(float(view_h));
+    const auto sx = [&](float cells) { return (cells - left) * zoom; };
+    const auto sy = [&](float cells) { return (cells - top) * zoom; };
     const float ww = float(world.width()), wh = float(world.height());
     const float light = float(world.daylight()) / 255.0f;
 
@@ -120,9 +132,10 @@ void WorldView::draw(Batch& batch, const Font& font, const phd::World& world, co
 
     // Rain and snow, in screen space over the nodes where it falls.
     const float node_px = phd::World::node * zoom;
-    const int n0x = std::max(0, int(camera.x) / phd::World::node), n0y = std::max(0, int(camera.y) / phd::World::node);
-    const int n1x = std::min(world.nodes_x() - 1, int(camera.x + float(view_w) / zoom) / phd::World::node);
-    const int n1y = std::min(world.nodes_y() - 1, int(camera.y + float(view_h) / zoom) / phd::World::node);
+    const int n0x = std::max(0, int(std::max(0.0f, left)) / phd::World::node);
+    const int n0y = std::max(0, int(std::max(0.0f, top)) / phd::World::node);
+    const int n1x = std::min(world.nodes_x() - 1, int(std::max(0.0f, left + float(view_w) / zoom)) / phd::World::node);
+    const int n1y = std::min(world.nodes_y() - 1, int(std::max(0.0f, top + float(view_h) / zoom)) / phd::World::node);
     const auto step = std::uint32_t(time * 12);
     const float wind_x = float(phd::icos(world.wind_angle())) / 1024.0f, wind_y = float(phd::isin(world.wind_angle())) / 1024.0f;
     int drops = 0;
