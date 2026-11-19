@@ -6,6 +6,7 @@
 //           [--frames N --speed 0-3]   (run N frames, print timings, quit)
 //           [--zoom Z] [--at X,Y]      (start zoom, 1-256, and focus cell)
 //           [--flat] [--relief K]      (no tilted view; display cells per metre)
+//           [--pixel N]                (screen pixels per art pixel, default 2)
 //
 // Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
 // T locks the camera top-down, G turns the tilted view off and on, O puts
@@ -30,6 +31,7 @@
 #include "font.hpp"
 #include "gl.hpp"
 #include "png.hpp"
+#include "pixel_target.hpp"
 #include "pointer.hpp"
 #include "world.hpp"
 #include "tilt_view.hpp"
@@ -151,6 +153,7 @@ int main(int argc, char** argv) {
     long long skip_ticks = 0;
     float start_zoom = 2, relief = 0.008f, at_x = -1, at_y = -1;
     bool tilt_enabled = true;
+    int pixel = 2;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const bool more = i + 1 < argc;
@@ -163,6 +166,8 @@ int main(int argc, char** argv) {
         } else if (arg == "--zoom" && more) {
             start_zoom = std::clamp(float(std::atof(argv[++i])), 1.0f, 256.0f);
         } else if (arg == "--at" && more && std::sscanf(argv[++i], "%f,%f", &at_x, &at_y) == 2) {
+        } else if (arg == "--pixel" && more) {
+            pixel = std::clamp(std::atoi(argv[++i]), 1, 8);
         } else if (arg == "--flat") {
             tilt_enabled = false;
         } else if (arg == "--relief" && more) {
@@ -190,7 +195,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return 1;
     }
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0); // the world draws into its own target, which has one
     SDL_Window* window = nullptr;
     SDL_GLContext context = create_context(window, width, height);
     if (!context) {
@@ -232,6 +237,14 @@ int main(int argc, char** argv) {
     }
 
     const int view_height = height - bar_height;
+    // The world is drawn at 1/pixel of the window's size (its logical size,
+    // so a scaled desktop and the Pi's panel give the same pixel grid), then
+    // scaled up by whole pixels.
+    const int art_w = width / pixel, art_h = (view_height + pixel - 1) / pixel;
+    gfx::PixelTarget target;
+    if (!target.init(art_w, art_h)) {
+        return 1;
+    }
     Camera camera;
     camera.cx = at_x >= 0 ? at_x : float(world.width()) / 2;
     camera.cy = at_y >= 0 ? at_y : float(world.height()) / 2;
@@ -432,20 +445,26 @@ int main(int argc, char** argv) {
         // Drawing.
         int drawable_w = width, drawable_h = height;
         SDL_GL_GetDrawableSize(window, &drawable_w, &drawable_h);
-        gl::Viewport(0, 0, drawable_w, drawable_h);
-        gl::ClearColor(0.04f, 0.05f, 0.05f, 1);
-        gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
         const bool tilted = tilt_enabled && camera.tilted();
+        const Camera art_camera = camera.for_target(float(pixel));
+        target.begin();
         if (tilted) {
             if (++tilt_frame % 15 == 0) {
                 tilt.refresh(world, 2);
             }
-            tilt.draw(world, camera, view.terrain(), font, width, height, view_height, frame_start);
+            tilt.draw(world, art_camera, view.terrain(), font, art_w, art_h, art_h, frame_start);
+        } else {
+            batch.begin(art_w, art_h);
+            view.draw(batch, font, world, art_camera, art_w, art_h, frame_start);
+            batch.end();
         }
+        const int world_draws = batch.draw_calls() + (tilted ? tilt.draw_calls() : 0);
+        target.end(drawable_w, drawable_h);
+        gl::ClearColor(0.04f, 0.05f, 0.05f, 1);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
         batch.begin(width, height);
-        if (!tilted) {
-            view.draw(batch, font, world, camera, width, view_height, frame_start);
-        }
+        // The framebuffer's rows run bottom to top.
+        batch.quad(target.texture(), 0, 0, float(art_w * pixel), float(art_h * pixel), 0, 1, 1, 0, white);
         if (inspected >= 0) {
             // Outline the cell, projected through the camera at its ground height.
             const float x = float(inspected % world.width()), y = float(inspected / world.width());
@@ -510,8 +529,8 @@ int main(int argc, char** argv) {
                 format("TICK %.3f MS  PI~%.2f/%.0f MS", tick_ms, pi_ms, pi_tick_budget_ms),
                 format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f  PITCH %.0f%s", frame_ms, fps, camera.zoom,
                        camera.pitch(), camera.top_down ? " LOCK" : tilt_enabled ? "" : " FLAT"),
-                format("DRAWS %d  QUADS %d  TRIS %d  BAKE %.2f MS", batch.draw_calls() + (tilted ? tilt.draw_calls() : 0),
-                       batch.quads(), tilted ? tilt.triangles() : 0, view.bake_ms()),
+                format("DRAWS %d  TRIS %d  BAKE %.2f MS  %dX%d Z%d", world_draws + batch.draw_calls(),
+                       tilted ? tilt.triangles() : 0, view.bake_ms(), art_w, art_h, target.depth_bits()),
                 format("SIM %.2f MB  RSS %.1f MB", world.memory_bytes() / 1048576.0, resident_bytes() / 1048576.0),
                 format("FRONTS %zu  WIND %d  %s", world.fronts().size(), world.wind_speed(), gl::is_es() ? "GLES" : "GL"),
             };

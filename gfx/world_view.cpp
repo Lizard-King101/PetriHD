@@ -108,7 +108,7 @@ void WorldView::update_sky(const phd::World& world) {
 
 void WorldView::draw(Batch& batch, const Font& font, const phd::World& world, const Camera& camera, int view_w,
                      int view_h, double time) {
-    const float zoom = camera.zoom;
+    const float zoom = camera.px();
     const float left = camera.left(float(view_w)), top = camera.top(float(view_h));
     const auto sx = [&](float cells) { return (cells - left) * zoom; };
     const auto sy = [&](float cells) { return (cells - top) * zoom; };

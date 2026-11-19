@@ -41,6 +41,26 @@ in place. Tilting turns about the ground at the focus, not about sea level.
   frame from flat-shaded boxes and frustums. They stand on `TiltView::ground`,
   which follows the mesh's own triangles, so feet stay on the drawn surface.
 
+## One pixel grid
+
+The world is drawn into an off-screen image at half the window's logical
+size (400 × 224 for the 800 × 480 panel) and scaled up by whole pixels with
+no smoothing (`gfx/pixel_target.cpp`, `--pixel N`). Ground, plants and
+creatures then share one pixel size, which is the pixel-art look of the
+concept art. The interface stays at full resolution on top.
+
+- **Snapping:** the camera used for drawing (`Camera::for_target`) moves the
+  focus by less than a pixel, so the ground lands on whole pixels. Panning
+  then slides the picture instead of resampling it, and texels don't crawl.
+- **Depth:** the target has its own depth buffer: 24-bit where the GPU has
+  `GL_OES_depth24` (and on desktop GL), otherwise 16-bit. The depth range
+  is fitted each frame to what can be on screen, instead of a fixed ±600
+  cells, so even a 16-bit buffer resolves thin legs and shadows.
+- **Precision:** shaders ask for full precision wherever the GPU has it.
+  At half precision, texture coordinates across the 1,536-texel terrain
+  texture land up to a texel and a half off, and the error shifts as the
+  camera moves.
+
 ## Controls
 
 | Key or flag | Effect |
@@ -51,6 +71,7 @@ in place. Tilting turns about the ground at the focus, not about sea level.
 | O | Move the test tree and creature to the focus |
 | `--zoom Z --at X,Y` | Start at a zoom and focus cell |
 | `--relief K` | Display cells of height per metre |
+| `--pixel N` | Screen pixels per art pixel (default 2; 1 turns the grid off) |
 
 ## Results on the PC
 
@@ -86,10 +107,16 @@ cost of baking are the numbers to check there.
   mountains.
 - The test objects only appear in the tilted view; the flat view has no
   sprites for them.
-- On this Wayland desktop, SDL makes the 800 × 480 window 400 × 240, so it
-  renders at half size. That needs looking into separately.
+- On a Wayland desktop at 2× scale, SDL 2 through `sdl2-compat` gives a
+  400 × 240 drawable for the 800 × 480 window, and the compositor stretches
+  it. Since the world is drawn at 400 × 224 anyway, only the interface text
+  loses sharpness. X11 gets the full size.
 
 ## Phase 2
+
+The order now: the terrain reworked to the 1–2 m scale; ground detail by
+zoom on the pixel grid; then plants and creature bodies drawn from the
+genome as low-poly models through the pixel grid, with procedural legs.
 
 1. Close-up ground detail above 64 px per cell, from seeds local to each
    chunk: grain, pebbles, grass clumps and leaf litter that follow the biome

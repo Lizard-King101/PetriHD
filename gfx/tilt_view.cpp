@@ -327,9 +327,14 @@ void TiltView::draw(const phd::World& world, const Camera& camera, const Texture
     gl::UseProgram(program_);
     gl::Uniform3f(u_focus_, camera.cx, camera.cy, camera.focus_z);
     gl::Uniform2f(u_trig_, camera.sin_pitch(), camera.cos_pitch());
-    gl::Uniform1f(u_zoom_, camera.zoom);
+    gl::Uniform1f(u_zoom_, camera.px());
     gl::Uniform4f(u_screen_, float(screen_w), float(screen_h), float(screen_w) / 2, float(view_h) / 2);
-    gl::Uniform1f(u_depth_, 1.0f / 600.0f);
+    // Fit the depth range to what can be on screen, so the depth buffer's
+    // steps stay small: the view's reach north and south, and the tallest
+    // relief above or below the focus.
+    const float reach = float(view_h) / (2 * camera.px() * camera.sin_pitch()) + 40;
+    const float relief = 3000 * relief_ + 4;
+    gl::Uniform1f(u_depth_, 1.0f / (reach * camera.cos_pitch() + relief * camera.sin_pitch() + 2));
     gl::Uniform1i(u_texture_, 0);
     std::uint8_t tint[3];
     art::day_tint(world, tint);

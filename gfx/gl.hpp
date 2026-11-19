@@ -29,7 +29,7 @@ constexpr GLenum UNPACK_ALIGNMENT = 0x0CF5, PACK_ALIGNMENT = 0x0D05;
 constexpr GLenum TEXTURE_2D = 0x0DE1;
 constexpr GLenum UNSIGNED_BYTE = 0x1401, UNSIGNED_SHORT = 0x1403, FLOAT = 0x1406;
 constexpr GLenum RGB = 0x1907, RGBA = 0x1908;
-constexpr GLenum VERSION = 0x1F02;
+constexpr GLenum VERSION = 0x1F02, EXTENSIONS = 0x1F03;
 constexpr GLenum NEAREST = 0x2600, LINEAR = 0x2601;
 constexpr GLenum TEXTURE_MAG_FILTER = 0x2800, TEXTURE_MIN_FILTER = 0x2801;
 constexpr GLenum TEXTURE_WRAP_S = 0x2802, TEXTURE_WRAP_T = 0x2803;
@@ -40,12 +40,22 @@ constexpr GLenum ARRAY_BUFFER = 0x8892, ELEMENT_ARRAY_BUFFER = 0x8893, STREAM_DR
 constexpr GLenum FRAGMENT_SHADER = 0x8B30, VERTEX_SHADER = 0x8B31;
 constexpr GLenum COMPILE_STATUS = 0x8B81, LINK_STATUS = 0x8B82;
 constexpr GLbitfield COLOR_BUFFER_BIT = 0x4000;
+constexpr GLenum FRAMEBUFFER = 0x8D40, RENDERBUFFER = 0x8D41, COLOR_ATTACHMENT0 = 0x8CE0, DEPTH_ATTACHMENT = 0x8D00;
+constexpr GLenum DEPTH_COMPONENT16 = 0x81A5, DEPTH_COMPONENT24 = 0x81A6, FRAMEBUFFER_COMPLETE = 0x8CD5;
 
 #define PHD_GL_FUNCTIONS(X)                                                                  \
     X(void, ActiveTexture, (GLenum))                                                         \
     X(void, AttachShader, (GLuint, GLuint))                                                  \
     X(void, BindAttribLocation, (GLuint, GLuint, const GLchar*))                             \
     X(void, BindBuffer, (GLenum, GLuint))                                                    \
+    X(void, BindFramebuffer, (GLenum, GLuint))                                               \
+    X(void, BindRenderbuffer, (GLenum, GLuint))                                              \
+    X(GLenum, CheckFramebufferStatus, (GLenum))                                              \
+    X(void, FramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint))                       \
+    X(void, FramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint))                   \
+    X(void, GenFramebuffers, (GLsizei, GLuint*))                                             \
+    X(void, GenRenderbuffers, (GLsizei, GLuint*))                                            \
+    X(void, RenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei))                         \
     X(void, BindTexture, (GLenum, GLuint))                                                   \
     X(void, BlendFunc, (GLenum, GLenum))                                                     \
     X(void, BufferData, (GLenum, GLsizeiptr, const void*, GLenum))                           \

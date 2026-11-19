@@ -15,6 +15,7 @@ struct Camera {
     float zoom = 2;            // pixels per cell, as shown
     float target_zoom = 2;     // the power-of-two zoom it is moving to
     bool top_down = false;     // lock the pitch at straight down
+    float scale = 1;           // screen pixels per pixel of what is drawn: the pixel-art grid
 
     static constexpr float flat_limit = 32; // the last zoom that is always top-down
 
@@ -33,21 +34,35 @@ struct Camera {
     float sin_pitch() const { return std::sin(pitch() * 3.14159265f / 180); }
     float cos_pitch() const { return std::cos(pitch() * 3.14159265f / 180); }
     bool tilted() const { return zoom > flat_limit; }
+    // Pixels of the drawing per cell. Pitch always follows the screen zoom.
+    float px() const { return zoom / scale; }
+
+    // A copy for drawing into a target `scale` times smaller, with the focus
+    // moved by under a pixel so the ground lands on whole pixels: panning then
+    // slides the picture instead of resampling it, and texels don't crawl.
+    Camera for_target(float target_scale) const {
+        Camera c = *this;
+        c.scale = target_scale;
+        const float z = c.px(), s = sin_pitch(), k = cos_pitch();
+        c.cx = std::round(cx * z) / z;
+        c.cy = (std::round((cy * s - focus_z * k) * z) / z + focus_z * k) / s;
+        return c;
+    }
 
     // The flat view's top-left cell, for a view w x h pixels.
-    float left(float w) const { return cx - w / (2 * zoom); }
-    float top(float h) const { return cy - h / (2 * zoom); }
+    float left(float w) const { return cx - w / (2 * px()); }
+    float top(float h) const { return cy - h / (2 * px()); }
 
     // World (cells, display height in cells) to screen pixels.
     void to_screen(float x, float y, float z, float w, float h, float& sx, float& sy) const {
-        sx = w / 2 + (x - cx) * zoom;
-        sy = h / 2 + ((y - cy) * sin_pitch() - (z - focus_z) * cos_pitch()) * zoom;
+        sx = w / 2 + (x - cx) * px();
+        sy = h / 2 + ((y - cy) * sin_pitch() - (z - focus_z) * cos_pitch()) * px();
     }
 
     // Screen pixels to the ground, taken as level with the focus.
     void to_ground(float sx, float sy, float w, float h, float& x, float& y) const {
-        x = cx + (sx - w / 2) / zoom;
-        y = cy + (sy - h / 2) / (zoom * sin_pitch());
+        x = cx + (sx - w / 2) / px();
+        y = cy + (sy - h / 2) / (px() * sin_pitch());
     }
 
     // Sets the zoom and keeps the ground point under (sx, sy) where it is.

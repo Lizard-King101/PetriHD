@@ -31,7 +31,12 @@ const char* load() {
 bool is_es() { return es; }
 
 const char* shader_preamble() {
-    return es ? "#version 100\nprecision mediump float;\n" : "#version 120\n";
+    // Full precision wherever the GPU has it: texture coordinates across the
+    // terrain texture need more bits than half precision gives, and the
+    // lookups would land up to a texel and a half off and shift with the camera.
+    return es ? "#version 100\n#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\n"
+                "precision mediump float;\n#endif\n"
+              : "#version 120\n";
 }
 
 namespace {
