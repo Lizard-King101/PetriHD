@@ -63,12 +63,13 @@ int main(int argc, char** argv) {
     }
     row();
     for (int v = 0; v < 10; ++v) {
-        place({Kind::grass, std::uint16_t(4 + v * 3), std::uint16_t(2 + v / 2), std::uint8_t(v * 2), 0, 0,
+        place({Kind::grass, std::uint16_t(4 + v * 3), std::uint16_t(2 + v / 2), std::uint8_t(150 - v * 9),
+               std::uint8_t(158 - v * 5), std::uint8_t(64 + v),
                std::uint8_t(v % 3 == 0 ? flowering : 0), std::uint8_t(v % 6), std::uint8_t(v)});
     }
-    place({Kind::grass, 14, 4, 0, 0, 0, bare, 0, 0});
+    place({Kind::grass, 14, 4, 176, 158, 104, bare, 0, 0});
     for (int v = 0; v < 6; ++v) {
-        place({Kind::reed, std::uint16_t(10 + v * 4), std::uint16_t(2 + v / 2), 6, 0, 0, 0, 0, std::uint8_t(v)});
+        place({Kind::reed, std::uint16_t(10 + v * 4), std::uint16_t(2 + v / 2), 112, 136, 60, 0, 0, std::uint8_t(v)});
     }
     const char* path = argc > 1 ? argv[1] : "sprites.png";
     if (!phd::write_png(path, width, height, rgb)) {

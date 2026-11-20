@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -8,6 +9,7 @@
 #include "camera.hpp"
 #include "font.hpp"
 #include "plant_sprites.hpp"
+#include "terrain_art.hpp"
 #include "world.hpp"
 
 namespace gfx {
@@ -38,13 +40,20 @@ public:
     float ground(float x, float y) const;
     void place_test_scene(const phd::World& world, float x, float y);
 
-    void draw(const phd::World& world, const Camera& camera, const Texture& terrain, const Font& font, int screen_w,
-              int screen_h, int view_h, double time);
+    // True when the visible ground and foliage have finished their first build.
+    bool draw(const phd::World& world, const Camera& camera, const Texture& terrain, const Font& font, int screen_w,
+              int screen_h, int view_h, double time, bool capture = false);
 
     int draw_calls() const { return draw_calls_; }
     int trees() const { return trees_; }
     int triangles() const { return triangles_; }
     int sprites() const { return sprites_drawn_; }
+    // Sprites painted into the atlas, and whether it has run out of room.
+    int atlas_sprites() const { return int(painted_.size()); }
+    bool atlas_full() const { return atlas_full_; }
+    // Milliseconds a frame spent painting ground, smoothed, and the most in one frame.
+    double ground_ms() const { return ground_ms_; }
+    double ground_ms_max() const { return ground_ms_max_; }
 
 private:
     struct Vertex {
@@ -64,11 +73,22 @@ private:
         std::uint64_t built_tick = 0;
         int built_atlas = -1;
         bool stale = false; // the world's heights have moved on from its mesh
+        bool plants_moved = false; // the plants' ground mesh has changed
     };
     struct SpriteVertex {
         float x, y, z;      // where the plant stands
         float ox, oy, u, v; // this corner's offset in texels, and its place in the atlas
         Color sway;         // r: how far the corner sways; g: the plant's beat; b: set on a trunk's top corners
+    };
+    struct PlantMesh {
+        std::vector<SpriteVertex> sprites;
+        std::vector<Vertex> shadows;
+        int trees = 0, tall = 0, wide = 0;
+        void clear() {
+            sprites.clear();
+            shadows.clear();
+            trees = tall = wide = 0;
+        }
     };
     // How a sprite hangs from its spot: its foot fixed and its top swaying,
     // the whole of it swaying (a crown up on its trunk), or a trunk, shown
@@ -87,20 +107,40 @@ private:
     void build_chunk(Chunk& chunk);
     const Sprite* sprite(const art::sprites::Spec& spec);
     void reset_atlas();
-    void add_sprite(const Sprite& sprite, float x, float y, float z, float sway, std::uint32_t id,
+    void add_sprite(PlantMesh& mesh, const Sprite& sprite, float x, float y, float z, float sway, std::uint32_t id,
                     Stand stand = Stand::rooted, float lift = 0, int below = 0);
-    void add_tree(float x, float y, float height, float radius, bool conifer, bool leafless, std::uint8_t r,
+    void add_tree(PlantMesh& mesh, float x, float y, float height, float radius, bool conifer, bool leafless, std::uint8_t r,
                   std::uint8_t g, std::uint8_t b, std::uint32_t id);
     bool allocate(int w, int h, int& x, int& y);
-    void build_plants(const phd::World& world, Chunk& chunk);
-    void draw_plants(const phd::World& world, const Camera& camera, const Font& font, int screen_w, int screen_h,
-                     int view_h, double time);
+    void build_plant_row(const phd::World& world, int cy, int x0, int x1);
+    bool update_plants(const phd::World& world, const Camera& camera, bool capture);
+    bool draw_plants(const phd::World& world, const Camera& camera, const Font& font, int screen_w, int screen_h,
+                     int view_h, double time, bool capture);
     void build_scene(const phd::World& world, const Camera& camera, const Font& font, double time, int view_w,
                      int view_h);
 
     float relief_;
     bool shoreline_study_;
-    Texture bank_texture_;
+
+    // The painted ground of the close view (ground_art.hpp), kept around the
+    // camera in a wrapping 64-cell window. A small texture says which
+    // patches belong to this window and can be sampled at either detail level.
+    static constexpr int patch_cells = 4, window_patches = 16;
+    struct GroundPatch {
+        int x = 0, y = 0; // world patch coordinates of the uploaded pixels
+        std::uint32_t signature = 0;
+        std::uint64_t checked_tick = 0, painted_frame = 0;
+        bool contains(int px, int py) const { return painted_frame && x == px && y == py; }
+    };
+    bool update_ground(const phd::World& world, const Camera& camera, int screen_w, int view_h, bool capture);
+    void paint_ground(const phd::World& world, int patch_x, int patch_y);
+    Texture ground_, ground_half_, ground_valid_;
+    std::array<GroundPatch, window_patches * window_patches> ground_patches_{};
+    std::vector<std::uint8_t> tile_rgba_, tile_half_;
+    std::uint64_t ground_frame_ = 0;
+    int ground_cursor_ = 0, window_x_ = 0, window_y_ = 0;
+    double ground_ms_ = 0, ground_ms_max_ = 0;
+    gl::GLint u_ground_window_ = -1;
     int width_ = 0, height_ = 0;
     std::vector<float> corners_; // (width + 1) x (height + 1) display heights, as the world is now
     // The heights each chunk's mesh was last built with. Water rises and
@@ -110,6 +150,7 @@ private:
     std::vector<Chunk> chunks_;
     std::vector<Vertex> scratch_;
     std::vector<std::uint16_t> index_scratch_;
+    std::uint64_t heights_tick_ = 0;
     int next_ = 0;
 
     gl::GLuint program_ = 0, scene_vbo_ = 0;
@@ -122,15 +163,19 @@ private:
     std::vector<Shelf> shelves_;
     bool atlas_full_ = false;
     int frames_full_ = 0;
-    std::unordered_map<std::uint64_t, Sprite> sprite_cache_;
-    std::vector<SpriteVertex> sprite_scratch_;
-    std::vector<Vertex> shadow_scratch_;
+    std::unordered_map<std::uint64_t, Sprite> sprite_cache_; // by spec, stand-ins included
+    std::vector<Sprite> painted_;                            // the sprites really in the atlas
+    PlantMesh plant_mesh_, scene_plants_;
+    int scene_tree_atlas_ = -1;
+    Chunk* building_ = nullptr;
+    int next_plant_cell_ = 0;
+    std::uint64_t plant_start_tick_ = 0;
+    art::Sun plant_sun_{};
     std::vector<Chunk*> plant_chunks_;
     gl::GLuint sprite_program_ = 0, scene_sprite_vbo_ = 0;
     gl::GLint s_focus_ = -1, s_trig_ = -1, s_zoom_ = -1, s_screen_ = -1, s_depth_ = -1, s_tint_ = -1, s_wind_ = -1, s_texel_ = -1;
     float white_u_ = 0, white_v_ = 0;
-    unsigned plant_cursor_ = 0;
-    int sprites_drawn_ = 0, tallest_ = 0, widest_ = 0;
+    int sprites_drawn_ = 0;
 
     bool scene_ = false;
     float scene_x_ = 0, scene_y_ = 0;

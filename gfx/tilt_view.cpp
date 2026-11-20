@@ -1,12 +1,16 @@
 #include "tilt_view.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <string>
+#include <tuple>
 
 #include "math.hpp"
-#include "shoreline_art.hpp"
+#include "ground_art.hpp"
+#include "palette.hpp"
 #include "terrain_art.hpp"
 
 namespace gfx {
@@ -35,9 +39,9 @@ uniform float u_zoom;
 uniform vec4 u_screen; // screen width, height, and the view's centre
 uniform float u_depth;
 varying vec2 v_uv;
-#ifdef SHORELINE_STUDY
-uniform vec3 u_bank_region; // origin in cells, width in cells
-varying vec2 v_bank;
+#ifdef PAINTED_GROUND
+uniform vec4 u_ground_window; // a whole-window origin in cells, then the validity map's offset in UV
+varying vec2 v_ground;
 #endif
 varying vec4 v_color;
 uniform vec3 u_sun;
@@ -48,8 +52,9 @@ void main() {
     float sy = u_screen.w + (p.y * u_trig.x - p.z * u_trig.y) * u_zoom;
     float d = -(p.y * u_trig.y + p.z * u_trig.x) * u_depth;
     v_uv = a_uv;
-#ifdef SHORELINE_STUDY
-    v_bank = (a_position.xy - u_bank_region.xy) / u_bank_region.z;
+#ifdef PAINTED_GROUND
+    // The window is 64 cells square and wraps.
+    v_ground = (a_position.xy - u_ground_window.xy) / 64.0;
 #endif
     // The ground is lit from the slopes it really has, the same rule as the
     // flat bake uses, so near-flat ground matches the flat view.
@@ -62,22 +67,27 @@ void main() {
 
 const char* fragment_source = R"(
 uniform sampler2D u_texture;
-#ifdef SHORELINE_STUDY
-uniform sampler2D u_bank;
+#ifdef PAINTED_GROUND
+uniform sampler2D u_ground;
+uniform sampler2D u_ground_valid;
+uniform vec4 u_ground_window;
 uniform float u_lit;
-varying vec2 v_bank;
+varying vec2 v_ground;
 #endif
 uniform vec4 u_tint;
 varying vec2 v_uv;
 varying vec4 v_color;
 void main() {
-    vec4 surface = texture2D(u_texture, v_uv);
-#ifdef SHORELINE_STUDY
-    if (u_lit > 0.5 && all(greaterThanEqual(v_bank, vec2(0.0))) && all(lessThanEqual(v_bank, vec2(1.0)))) {
-        surface = texture2D(u_bank, v_bank);
+#ifdef PAINTED_GROUND
+    // A reassigned slot can still contain the previous bank's pixels.
+    vec2 local = v_ground - u_ground_window.zw;
+    if (u_lit > 0.5 && all(greaterThanEqual(local, vec2(0.0))) && all(lessThan(local, vec2(1.0))) &&
+        texture2D(u_ground_valid, local).r > 0.5) {
+        gl_FragColor = texture2D(u_ground, v_ground) * v_color * u_tint;
+        return;
     }
 #endif
-    gl_FragColor = surface * v_color * u_tint;
+    gl_FragColor = texture2D(u_texture, v_uv) * v_color * u_tint;
 }
 )";
 
@@ -137,10 +147,7 @@ constexpr int atlas_width = 2048, atlas_height = 2048;
 
 bool TiltView::init(const phd::World& world) {
     static const char* const attributes[] = {"a_position", "a_uv", "a_color"};
-    if (shoreline_study_) {
-        bank_texture_ = shoreline::make_study_texture(world);
-    }
-    const std::string defines = bank_texture_.id ? "#define SHORELINE_STUDY\n" : "";
+    const std::string defines = shoreline_study_ ? "#define PAINTED_GROUND\n" : "";
     program_ = gl::program((defines + vertex_source).c_str(), (defines + fragment_source).c_str(), attributes, 3);
     if (!program_) {
         return false;
@@ -154,10 +161,21 @@ bool TiltView::init(const phd::World& world) {
     u_texture_ = gl::GetUniformLocation(program_, "u_texture");
     u_sun_ = gl::GetUniformLocation(program_, "u_sun");
     u_lit_ = gl::GetUniformLocation(program_, "u_lit");
-    if (bank_texture_.id) {
+    if (shoreline_study_) {
         gl::UseProgram(program_);
-        gl::Uniform1i(gl::GetUniformLocation(program_, "u_bank"), 1);
-        gl::Uniform3f(gl::GetUniformLocation(program_, "u_bank_region"), shoreline::left, shoreline::top, shoreline::extent);
+        gl::Uniform1i(gl::GetUniformLocation(program_, "u_ground"), 1);
+        gl::Uniform1i(gl::GetUniformLocation(program_, "u_ground_valid"), 2);
+        u_ground_window_ = gl::GetUniformLocation(program_, "u_ground_window");
+        constexpr int patch_size = patch_cells * art::ground::texels_per_cell;
+        constexpr int size = window_patches * patch_size;
+        tile_rgba_.resize(patch_size * patch_size * 4);
+        tile_half_.resize(tile_rgba_.size() / 4);
+        ground_valid_ = make_texture(window_patches, window_patches, gl::RGBA, nullptr);
+        for (Texture* texture : {&ground_, &ground_half_}) {
+            *texture = make_texture(texture == &ground_ ? size : size / 2, texture == &ground_ ? size : size / 2, gl::RGBA, nullptr);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::GLint(gl::REPEAT));
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::GLint(gl::REPEAT));
+        }
     }
     gl::GenBuffers(1, &scene_vbo_);
     if (shoreline_study_) {
@@ -200,6 +218,7 @@ bool TiltView::init(const phd::World& world) {
 }
 
 void TiltView::build_heights(const phd::World& world) {
+    heights_tick_ = world.tick();
     const auto surface = [&](int x, int y) {
         x = std::clamp(x, 0, width_ - 1);
         y = std::clamp(y, 0, height_ - 1);
@@ -255,7 +274,7 @@ void TiltView::build_chunk(Chunk& chunk) {
             float& was = drawn_[std::size_t(y) * (width_ + 1) + x];
             if (was != z) {
                 was = z;
-                chunk.built_atlas = -1;
+                chunk.plants_moved = true;
             }
             chunk.zmin = std::min(chunk.zmin, z);
             chunk.zmax = std::max(chunk.zmax, z);
@@ -291,13 +310,143 @@ void TiltView::build_chunk(Chunk& chunk) {
 void TiltView::refresh(const phd::World& world, int count) {
     // Water levels change slowly. The heights are read again, and the
     // meshes follow: those on screen as they are drawn, the rest in turn.
-    build_heights(world);
+    if (heights_tick_ != world.tick()) {
+        build_heights(world);
+    }
     for (int k = 0; k < count && !chunks_.empty(); ++k) {
         Chunk& chunk = chunks_[std::size_t(next_++ % int(chunks_.size()))];
         if (chunk.stale) {
             build_chunk(chunk);
         }
     }
+}
+
+// One 4 x 4-cell patch, uploaded at both scales before the shader can see it.
+void TiltView::paint_ground(const phd::World& world, int patch_x, int patch_y) {
+    constexpr int size = patch_cells * art::ground::texels_per_cell;
+    art::ground::paint(world, patch_x * size, patch_y * size, size, size, tile_rgba_.data(), size * 4);
+    const int px = (patch_x % window_patches) * size, py = (patch_y % window_patches) * size;
+    update_texture_region(ground_, px, py, size, size, gl::RGBA, tile_rgba_.data());
+    for (int y = 0; y < size / 2; ++y) {
+        for (int x = 0; x < size / 2; ++x) {
+            const auto* in = &tile_rgba_[(std::size_t(2 * y) * size + 2 * x) * 4];
+            auto* out = &tile_half_[(std::size_t(y) * (size / 2) + x) * 4];
+            for (int c = 0; c < 3; ++c) {
+                out[c] = std::uint8_t((in[c] + in[4 + c] + in[size * 4 + c] + in[size * 4 + 4 + c] + 2) / 4);
+            }
+            out[3] = 255;
+        }
+    }
+    update_texture_region(ground_half_, px / 2, py / 2, size / 2, size / 2, gl::RGBA, tile_half_.data());
+}
+
+bool TiltView::update_ground(const phd::World& world, const Camera& camera, int screen_w, int view_h, bool capture) {
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
+    ++ground_frame_;
+    // Keep the coverage bounds aligned to eight-cell tiles at both zoom levels.
+    const auto first_patch = [](float focus) {
+        return 2 * int(std::floor(focus / (2 * patch_cells))) - window_patches / 2;
+    };
+    const int first_x = first_patch(camera.cx), first_y = first_patch(camera.cy);
+    const auto wrap = [](int i) { return (i % window_patches + window_patches) % window_patches; };
+    const auto patch_at = [&](int x, int y) -> GroundPatch& {
+        return ground_patches_[std::size_t(wrap(y)) * window_patches + wrap(x)];
+    };
+    bool mask_changed = ground_frame_ == 1 || window_x_ != first_x || window_y_ != first_y;
+    window_x_ = first_x;
+    window_y_ = first_y;
+
+    float gx0, gy0, gx1, gy1;
+    camera.to_ground(0, 0, float(screen_w), float(view_h), gx0, gy0);
+    camera.to_ground(float(screen_w), float(view_h), float(screen_w), float(view_h), gx1, gy1);
+    const auto tile_start = [](float cell) { return 2 * int(std::floor(cell / (2 * patch_cells))); };
+    const int x0 = std::max({tile_start(gx0 - 1), first_x, 0});
+    const int y0 = std::max({tile_start(gy0 - 4), first_y, 0});
+    const int x1 = std::min({tile_start(gx1 + 1) + 1, first_x + window_patches - 1, (width_ - 1) / patch_cells});
+    const int y1 = std::min({tile_start(gy1 + 4) + 1, first_y + window_patches - 1, (height_ - 1) / patch_cells});
+
+    const auto signature = [&](int x, int y) {
+        return art::ground::signature(world, x * patch_cells, y * patch_cells, patch_cells, patch_cells);
+    };
+    const auto fill = [&](int x, int y) {
+        paint_ground(world, x, y);
+        patch_at(x, y) = {x, y, signature(x, y), world.tick(), ground_frame_};
+        mask_changed = true;
+    };
+    int missing = 0, nearest_x = 0, nearest_y = 0;
+    float nearest = std::numeric_limits<float>::max();
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            if (patch_at(x, y).contains(x, y)) continue;
+            if (capture) {
+                fill(x, y);
+                continue;
+            }
+            ++missing;
+            const float dx = (x + 0.5f) * patch_cells - camera.cx;
+            const float dy = (y + 0.5f) * patch_cells - camera.cy;
+            const float distance = dx * dx + dy * dy;
+            if (distance < nearest) {
+                nearest = distance;
+                nearest_x = x;
+                nearest_y = y;
+            }
+        }
+    }
+    if (missing) fill(nearest_x, nearest_y);
+
+    // Once present, patches only need checking after a tick. Repaint at most
+    // one changed patch every other interactive frame. A capture drains them.
+    if ((capture || (missing == 0 && (ground_frame_ & 1))) && x1 >= x0 && y1 >= y0) {
+        const int across = x1 - x0 + 1, visible = across * (y1 - y0 + 1);
+        for (int k = 0; k < visible; ++k) {
+            const int at = (ground_cursor_ + k) % visible;
+            const int x = x0 + at % across, y = y0 + at / across;
+            auto& patch = patch_at(x, y);
+            if (patch.checked_tick == world.tick() || (!capture && ground_frame_ - patch.painted_frame < 30)) {
+                continue;
+            }
+            patch.checked_tick = world.tick();
+            const auto current = signature(x, y);
+            if (patch.signature != current) {
+                paint_ground(world, x, y);
+                patch.signature = current;
+                patch.painted_frame = ground_frame_;
+                if (!capture) {
+                    ground_cursor_ = (at + 1) % visible;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Only this 1 KiB map changes ownership on a jump. Unwritten or reused
+    // texture memory never needs clearing and cannot appear at another bank.
+    if (mask_changed) {
+        std::array<std::uint32_t, window_patches * window_patches> valid;
+        for (int y = 0; y < window_patches; ++y) {
+            for (int x = 0; x < window_patches; ++x) {
+                const int px = first_x + x, py = first_y + y;
+                valid[std::size_t(y) * window_patches + x] = patch_at(px, py).contains(px, py) ? 0xffffffffu : 0;
+            }
+        }
+        update_texture(ground_valid_, gl::RGBA, valid.data());
+    }
+    constexpr float span = float(patch_cells * window_patches);
+    const float origin_x = std::floor(camera.cx / span) * span, origin_y = std::floor(camera.cy / span) * span;
+    gl::Uniform4f(u_ground_window_, origin_x, origin_y,
+                  (first_x * patch_cells - origin_x) / span, (first_y * patch_cells - origin_y) / span);
+    gl::ActiveTexture(gl::TEXTURE0 + 2);
+    gl::BindTexture(gl::TEXTURE_2D, ground_valid_.id);
+    gl::ActiveTexture(gl::TEXTURE0 + 1);
+    gl::BindTexture(gl::TEXTURE_2D, camera.zoom >= 45 ? ground_.id : ground_half_.id);
+    gl::ActiveTexture(gl::TEXTURE0);
+
+    const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    ground_ms_ = ground_ms_ * 0.95 + ms * 0.05;
+    ground_ms_max_ = std::max(ground_ms_max_, ms);
+    return missing <= 1;
 }
 
 float TiltView::ground(float x, float y) const {
@@ -507,7 +656,9 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
 
     // The test plant: a tree about two cells tall.
     const float tx = scene_x_, ty = scene_y_, tz = ground(tx, ty);
-    shadow(tx - sun.x * 0.6f, ty - sun.y * 0.6f, 0.7f);
+    if (!shoreline_study_ || !scene_plants_.sprites.empty()) {
+        shadow(tx - sun.x * 0.6f, ty - sun.y * 0.6f, 0.7f);
+    }
     if (!shoreline_study_) {
         frustum(tx, ty, tz - 0.05f, tz + 1.0f, 0.10f, 0.06f, 6, {112, 80, 52, 255});
         frustum(tx, ty, tz + 0.7f, tz + 1.3f, 0.45f, 0.75f, 7, {58, 118, 54, 255});
@@ -556,7 +707,9 @@ void TiltView::reset_atlas() {
     update_texture(atlas_, gl::RGBA, clear.data());
     shelves_.clear();
     sprite_cache_.clear();
+    painted_.clear();
     atlas_full_ = false;
+    building_ = nullptr;
     ++atlas_generation_; // every chunk's quads now point at nothing
 }
 
@@ -597,17 +750,25 @@ const TiltView::Sprite* TiltView::sprite(const art::sprites::Spec& spec) {
     if (const auto found = sprite_cache_.find(key); found != sprite_cache_.end()) {
         return &found->second;
     }
-    const auto image = art::sprites::paint(spec);
-    // A clear texel around every sprite, so a swaying edge samples nothing.
+    // Once the atlas is full nothing more is painted until it is emptied:
+    // painting a sprite only to find no room for it, for every new plant,
+    // costs far more than the frame has.
+    art::sprites::Image image;
     int x = 0, y = 0;
-    if (!allocate(image.width + 2, image.height + 2, x, y)) {
+    bool placed = false;
+    if (!atlas_full_) {
+        image = art::sprites::paint(spec);
+        // A clear texel around every sprite, so a swaying edge samples nothing.
+        placed = allocate(image.width + 2, image.height + 2, x, y);
+    }
+    if (!placed) {
         // No room: stand in the nearest sprite of the same kind already
         // painted. The atlas is emptied and repainted later, not now.
         atlas_full_ = true;
         const Sprite* nearest = nullptr;
         int best = 1 << 30;
-        for (const auto& entry : sprite_cache_) {
-            const auto& other = entry.second.spec;
+        for (const Sprite& entry : painted_) {
+            const auto& other = entry.spec;
             if (other.kind != spec.kind || other.state != spec.state) {
                 continue;
             }
@@ -616,7 +777,7 @@ const TiltView::Sprite* TiltView::sprite(const art::sprites::Spec& spec) {
                                std::abs(int(other.b) - int(spec.b))) / 4 + (other.flower != spec.flower ? 8 : 0);
             if (apart < best) {
                 best = apart;
-                nearest = &entry.second;
+                nearest = &entry;
             }
         }
         // Remembered under this spec too, so the search is made once.
@@ -627,13 +788,14 @@ const TiltView::Sprite* TiltView::sprite(const art::sprites::Spec& spec) {
     const Sprite made{float(x) / atlas_width, float(y) / atlas_height, float(x + image.width) / atlas_width,
                       float(y + image.height) / atlas_height, image.width, image.height, image.anchor_x,
                       image.anchor_y, spec};
+    painted_.push_back(made);
     return &sprite_cache_.emplace(key, made).first->second;
 }
 
 // One sprite, hung from its spot. `lift` raises the spot above the ground, in
 // cells, and `below` is how many of the sprite's rows hang beneath it. A
 // trunk's top corners carry its true length and the shader shortens it.
-void TiltView::add_sprite(const Sprite& s, float x, float y, float z, float sway, std::uint32_t id, Stand stand,
+void TiltView::add_sprite(PlantMesh& mesh, const Sprite& s, float x, float y, float z, float sway, std::uint32_t id, Stand stand,
                           float lift, int below) {
     const float tpc = float(art::sprites::texels_per_cell);
     const float left = -float(s.anchor), right = float(s.w - s.anchor);
@@ -651,16 +813,16 @@ void TiltView::add_sprite(const Sprite& s, float x, float y, float z, float sway
     z += lift;
     const SpriteVertex a{x, y, z, left, top, s.u0, top_v, high}, b{x, y, z, right, top, s.u1, top_v, high},
         c{x, y, z, right, bottom, s.u1, s.v1, low}, d{x, y, z, left, bottom, s.u0, s.v1, low};
-    sprite_scratch_.insert(sprite_scratch_.end(), {a, b, c, a, c, d});
+    mesh.sprites.insert(mesh.sprites.end(), {a, b, c, a, c, d});
     // How far it can reach up the screen, at the lowest the camera tilts.
     const float reach = stand == Stand::upright ? top * 0.72f : lift * tpc * 0.72f + top;
-    tallest_ = std::max(tallest_, int(reach) + 1);
-    widest_ = std::max({widest_, s.anchor, s.w - s.anchor});
+    mesh.tall = std::max(mesh.tall, int(reach) + 1);
+    mesh.wide = std::max({mesh.wide, s.anchor, s.w - s.anchor});
 }
 
 // A tree in pieces, each at its own height, so they slide over one another
 // as the camera tilts: a trunk, and a crown or a stack of boughs.
-void TiltView::add_tree(float x, float y, float h, float r, bool conifer, bool leafless, std::uint8_t cr,
+void TiltView::add_tree(PlantMesh& mesh, float x, float y, float h, float r, bool conifer, bool leafless, std::uint8_t cr,
                         std::uint8_t cg, std::uint8_t cb, std::uint32_t id) {
     using namespace art::sprites;
     const float tpc = float(texels_per_cell), z = ground(x, y);
@@ -673,7 +835,7 @@ void TiltView::add_tree(float x, float y, float h, float r, bool conifer, bool l
         spec.radius = std::uint16_t(girth + 0.5f);
         spec.state = leafless ? bare : 0;
         if (const Sprite* s = sprite(spec)) {
-            add_sprite(*s, x, y, z, swing, id, Stand::upright, length);
+            add_sprite(mesh, *s, x, y, z, swing, id, Stand::upright, length);
         }
     };
     Spec spec;
@@ -695,7 +857,7 @@ void TiltView::add_tree(float x, float y, float h, float r, bool conifer, bool l
             spec.state = last ? tip : 0;
             spec.variant = std::uint8_t((id + unsigned(k)) % 2);
             if (const Sprite* s = sprite(spec)) {
-                add_sprite(*s, x, y + wide * 0.5f, z, sway * (up + step) / h, id, Stand::rigid, up);
+                add_sprite(mesh, *s, x, y + wide * 0.5f, z, sway * (up + step) / h, id, Stand::rigid, up);
             }
         }
         return;
@@ -708,18 +870,13 @@ void TiltView::add_tree(float x, float y, float h, float r, bool conifer, bool l
     spec.state = leafless ? bare : 0;
     spec.variant = std::uint8_t(id % 3);
     if (const Sprite* s = sprite(spec)) {
-        add_sprite(*s, x, y, z, sway, id, Stand::rigid, lift, s->anchor_y);
+        add_sprite(mesh, *s, x, y, z, sway, id, Stand::rigid, lift, s->anchor_y);
     }
 }
 
-// The plants of one chunk as sprite quads and shadows.
-void TiltView::build_plants(const phd::World& world, Chunk& chunk) {
+// Append a run of cells in the same row-major order as a whole chunk.
+void TiltView::build_plant_row(const phd::World& world, int cy, int x0, int x1) {
     using namespace art::sprites;
-    sprite_scratch_.clear();
-    shadow_scratch_.clear();
-    chunk.trees = 0;
-    tallest_ = widest_ = 0;
-    const auto sun = art::sun_for(world);
     const auto unit = [](std::uint32_t bits) { return float(bits & 255) / 255.0f; };
     // A shadow on the ground: a polygon as a fan from its first corner.
     const auto shadow = [&](float x, float y, float radius, int sides) {
@@ -731,101 +888,164 @@ void TiltView::build_plants(const phd::World& world, Chunk& chunk) {
         };
         const Vertex first = corner(0);
         for (int k = 1; k + 1 < sides; ++k) {
-            shadow_scratch_.insert(shadow_scratch_.end(), {first, corner(k), corner(k + 1)});
+            plant_mesh_.shadows.insert(plant_mesh_.shadows.end(), {first, corner(k), corner(k + 1)});
         }
     };
     const float tpc = float(texels_per_cell);
-    for (int cy = chunk.y0; cy < chunk.y0 + chunk.h; ++cy) {
-        for (int cx = chunk.x0; cx < chunk.x0 + chunk.w; ++cx) {
-            const auto cell = std::size_t(cy) * width_ + cx;
-            const bool wet = world.water(cell) != phd::Water::none;
-            if (const auto t = art::tree_in(world, cx, cy); t.radius > 0) {
-                ++chunk.trees;
-                const float r = t.radius;
-                add_tree(t.x, t.y, std::max(1.2f, t.height), r, t.conifer, t.bare, (t.r & 0xe0) | 0x10,
-                         (t.g & 0xe0) | 0x10, (t.b & 0xe0) | 0x10, t.id);
-                if (!t.bare && !wet) {
-                    shadow(t.x - sun.x * r * 0.8f, t.y - sun.y * r * 0.8f, r * 0.86f, 10);
+    // A plant's sprite takes the palette's colour for it, the one the ground
+    // and the bird's-eye view use, in steps so similar plants share a sprite.
+    const auto pigment = [&](Spec& spec, const phd::Plant& plant) {
+        const auto c = art::palette::leaf(plant, world);
+        const auto step = [](float v) { return std::uint8_t((int(std::clamp(v, 0.0f, 255.0f)) & 0xe0) | 0x10); };
+        spec.r = step(c.r), spec.g = step(c.g), spec.b = step(c.b);
+    };
+    for (int cx = x0; cx < x1; ++cx) {
+        const auto cell = std::size_t(cy) * width_ + cx;
+        const bool wet = world.water(cell) != phd::Water::none;
+        if (const auto t = art::tree_in(world, cx, cy); t.radius > 0) {
+            ++plant_mesh_.trees;
+            const float r = t.radius;
+            add_tree(plant_mesh_, t.x, t.y, std::max(1.2f, t.height), r, t.conifer, t.bare, (t.r & 0xe0) | 0x10,
+                     (t.g & 0xe0) | 0x10, (t.b & 0xe0) | 0x10, t.id);
+            if (!t.bare && !wet) {
+                shadow(t.x - plant_sun_.x * r * 0.8f, t.y - plant_sun_.y * r * 0.8f, r * 0.86f, 10);
+            }
+            continue;
+        }
+        const int depth = wet ? world.water_depth_dm(cell) : 0;
+        for (int slot = 0; slot < 4; ++slot) {
+            const phd::Plant* p = world.occupant(cell, slot);
+            if (!p) {
+                continue;
+            }
+            const auto place = phd::hash3(0, int(p->id), 0x841d5a73u);
+            const auto& genes = p->genome.gene;
+            const bool dormant = p->flags & phd::plant_dormant;
+            Spec spec;
+            spec.variant = std::uint8_t(p->id % 3);
+            if (phd::woody(p->genome)) {
+                if (p->height < 4) {
+                    continue;
+                }
+                const float x = float(cx) + 0.25f + 0.5f * float(slot & 1) + (unit(place) - 0.5f) * 0.3f;
+                const float y = float(cy) + 0.25f + 0.5f * float(slot >> 1) + (unit(place >> 8) - 0.5f) * 0.3f;
+                const float hh = float(p->height) / float(phd::cell_decimetres);
+                const float reach = std::min(0.58f, std::min(0.3f, 0.1f + hh * 0.2f) + 0.16f * hh);
+                const bool leafless = dormant && !phd::evergreen(p->genome);
+                const bool cone = phd::evergreen(p->genome) && genes[phd::gene_cold] >= 150;
+                float front; // how far south of its spot the sprite touches the ground, at 55 degrees
+                if (cone) {
+                    spec.kind = Kind::cone_bush;
+                    spec.radius = std::uint16_t(quantise(reach * 0.6f * tpc, 2));
+                    spec.height = std::uint16_t(quantise(hh * tpc * rise * 1.15f + 3, 2));
+                    front = 0.1f;
+                } else {
+                    // A dome: its top at the shrub's height, its near edge on the ground in front.
+                    spec.kind = Kind::bush;
+                    spec.radius = std::uint16_t(quantise(reach * tpc, 2));
+                    spec.height = std::uint16_t(quantise(hh * tpc * rise + reach * tpc * lie * 0.5f, 2));
+                    front = reach * 0.5f;
+                }
+                pigment(spec, *p);
+                spec.state = leafless ? bare : 0;
+                const Sprite* s = sprite(spec);
+                if (s) {
+                    // Hung from its middle, so it settles over its spot as the camera rises.
+                    const float lift = hh * 0.45f;
+                    add_sprite(plant_mesh_, *s, x, y, ground(x, y), hh * 0.03f * tpc, p->id, Stand::rooted, lift,
+                               int((front * lie + lift * rise) * tpc + 0.5f));
+                }
+                if (s && !leafless && !wet && hh > 0.4f) {
+                    shadow(x - plant_sun_.x * reach * 0.5f, y + front * 0.6f - plant_sun_.y * reach * 0.5f, reach * 0.8f, 6);
                 }
                 continue;
             }
-            const int depth = wet ? world.water_depth_dm(cell) : 0;
-            for (int slot = 0; slot < 4; ++slot) {
-                const phd::Plant* p = world.occupant(cell, slot);
-                if (!p) {
-                    continue;
-                }
-                const auto place = phd::hash3(0, int(p->id), 0x841d5a73u);
-                const auto& genes = p->genome.gene;
-                const bool dormant = p->flags & phd::plant_dormant;
-                Spec spec;
-                spec.variant = std::uint8_t(p->id % 3);
-                if (phd::woody(p->genome)) {
-                    if (p->height < 4) {
-                        continue;
-                    }
-                    const float x = float(cx) + 0.25f + 0.5f * float(slot & 1) + (unit(place) - 0.5f) * 0.3f;
-                    const float y = float(cy) + 0.25f + 0.5f * float(slot >> 1) + (unit(place >> 8) - 0.5f) * 0.3f;
-                    const float hh = float(p->height) / float(phd::cell_decimetres);
-                    const float reach = std::min(0.58f, std::min(0.3f, 0.1f + hh * 0.2f) + 0.16f * hh);
-                    const bool leafless = dormant && !phd::evergreen(p->genome);
-                    const bool cone = phd::evergreen(p->genome) && genes[phd::gene_cold] >= 150;
-                    float front; // how far south of its spot the sprite touches the ground, at 55 degrees
-                    if (cone) {
-                        spec.kind = Kind::cone_bush;
-                        spec.radius = std::uint16_t(quantise(reach * 0.6f * tpc, 2));
-                        spec.height = std::uint16_t(quantise(hh * tpc * rise * 1.15f + 3, 2));
-                        front = 0.1f;
-                    } else {
-                        // A dome: its top at the shrub's height, its near edge on the ground in front.
-                        spec.kind = Kind::bush;
-                        spec.radius = std::uint16_t(quantise(reach * tpc, 2));
-                        spec.height = std::uint16_t(quantise(hh * tpc * rise + reach * tpc * lie * 0.5f, 2));
-                        front = reach * 0.5f;
-                    }
-                    const int leaf = genes[phd::gene_leaf] / 52 * 52 + 26; // five leaf colours
-                    spec.r = std::uint8_t(leafless ? 112 : 60 + leaf / 6);
-                    spec.g = std::uint8_t(leafless ? 96 : 110 - leaf / 12);
-                    spec.b = std::uint8_t(leafless ? 80 : 52);
-                    spec.state = leafless ? bare : 0;
-                    const Sprite* s = sprite(spec);
-                    if (s) {
-                        // Hung from its middle, so it settles over its spot as the camera rises.
-                        const float lift = hh * 0.45f;
-                        add_sprite(*s, x, y, ground(x, y), hh * 0.03f * tpc, p->id, Stand::rooted, lift,
-                                   int((front * lie + lift * rise) * tpc + 0.5f));
-                    }
-                    if (s && !leafless && !wet && hh > 0.4f) {
-                        shadow(x - sun.x * reach * 0.5f, y + front * 0.6f - sun.y * reach * 0.5f, reach * 0.8f, 6);
-                    }
-                    continue;
-                }
-                // Soft plants: grass, herbs and reeds, as tall as what stands clear of the water.
-                const float height = float(int(p->height) - depth) / float(phd::cell_decimetres);
-                if (height < 0.07f) {
-                    continue;
-                }
-                const float x = float(cx) + 0.25f + 0.5f * float(slot & 1) + (unit(place) - 0.5f) * 0.4f;
-                const float y = float(cy) + 0.25f + 0.5f * float(slot >> 1) + (unit(place >> 8) - 0.5f) * 0.4f;
-                const bool reed = genes[phd::gene_flood] > 155;
-                const bool flowers = (p->flags & phd::plant_flowering) && !dormant;
-                spec.kind = reed ? Kind::reed : Kind::grass;
-                spec.height = std::uint16_t(std::max(3, quantise(height * tpc * rise)));
-                spec.radius = std::uint16_t(std::clamp(int(float(spec.height) * (reed ? 0.2f : 0.35f)), 2, reed ? 4 : 6));
-                spec.r = std::uint8_t(genes[phd::gene_leaf] / 64 * 6 + 3);
-                spec.state = std::uint8_t((dormant ? bare : 0) | (flowers ? flowering : 0));
-                spec.flower = flowers ? std::uint8_t(genes[phd::gene_flower] * 6 / 256) : 0;
-                const Sprite* s = sprite(spec);
-                if (s) {
-                    add_sprite(*s, x, y, ground(x, y), std::max(1.0f, height * 0.06f * tpc), p->id);
-                }
+            // Soft plants: grass, herbs and reeds, as tall as what stands clear of the water.
+            const float height = float(int(p->height) - depth) / float(phd::cell_decimetres);
+            if (height < 0.07f) {
+                continue;
+            }
+            const float x = float(cx) + 0.25f + 0.5f * float(slot & 1) + (unit(place) - 0.5f) * 0.4f;
+            const float y = float(cy) + 0.25f + 0.5f * float(slot >> 1) + (unit(place >> 8) - 0.5f) * 0.4f;
+            const bool reed = genes[phd::gene_flood] > 155;
+            const bool flowers = (p->flags & phd::plant_flowering) && !dormant;
+            spec.kind = reed ? Kind::reed : Kind::grass;
+            spec.height = std::uint16_t(std::max(3, quantise(height * tpc * rise)));
+            spec.radius = std::uint16_t(std::clamp(int(float(spec.height) * (reed ? 0.2f : 0.35f)), 2, reed ? 4 : 6));
+            pigment(spec, *p);
+            spec.state = std::uint8_t((dormant ? bare : 0) | (flowers ? flowering : 0));
+            spec.flower = flowers ? std::uint8_t(genes[phd::gene_flower] * 6 / 256) : 0;
+            const Sprite* s = sprite(spec);
+            if (s) {
+                add_sprite(plant_mesh_, *s, x, y, ground(x, y), std::max(1.0f, height * 0.06f * tpc), p->id);
             }
         }
     }
 }
 
-void TiltView::draw_plants(const phd::World& world, const Camera& camera, const Font& font, int screen_w, int screen_h,
-                           int view_h, double time) {
+bool TiltView::update_plants(const phd::World& world, const Camera& camera, bool capture) {
+    using Clock = std::chrono::steady_clock;
+    const auto deadline = Clock::now() + std::chrono::microseconds(1500);
+    if (building_ && (std::find(plant_chunks_.begin(), plant_chunks_.end(), building_) == plant_chunks_.end() ||
+                      (capture && plant_start_tick_ != world.tick()))) {
+        building_->plants_moved = true;
+        building_ = nullptr;
+    }
+    const auto priority = [&](const Chunk& chunk) {
+        const bool has_mesh = chunk.built_atlas == atlas_generation_;
+        const float dx = chunk.x0 + chunk.w * 0.5f - camera.cx, dy = chunk.y0 + chunk.h * 0.5f - camera.cy;
+        return std::make_tuple(has_mesh, has_mesh ? chunk.built_tick : 0, dx * dx + dy * dy);
+    };
+    do {
+        if (!building_) {
+            for (Chunk* chunk : plant_chunks_) {
+                if (chunk->built_atlas == atlas_generation_ && chunk->built_tick == world.tick() && !chunk->plants_moved) {
+                    continue;
+                }
+                if (!building_ || priority(*chunk) < priority(*building_)) {
+                    building_ = chunk;
+                }
+            }
+            if (!building_) return true;
+            plant_mesh_.clear();
+            next_plant_cell_ = 0;
+            plant_start_tick_ = world.tick();
+            plant_sun_ = art::sun_for(world);
+            building_->plants_moved = false;
+        }
+
+        Chunk& chunk = *building_;
+        const int x = next_plant_cell_ % chunk.w, y = next_plant_cell_ / chunk.w;
+        const int cells = std::min(4, chunk.w - x);
+        build_plant_row(world, chunk.y0 + y, chunk.x0 + x, chunk.x0 + x + cells);
+        next_plant_cell_ += cells;
+        if (next_plant_cell_ == chunk.w * chunk.h) {
+            // Keep the last complete buffers on screen until both replacements
+            // are ready. If the world ticked mid-build, this mesh stays due.
+            gl::BindBuffer(gl::ARRAY_BUFFER, chunk.sprite_vbo);
+            gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(plant_mesh_.sprites.size() * sizeof(SpriteVertex)),
+                           plant_mesh_.sprites.data(), gl::DYNAMIC_DRAW);
+            gl::BindBuffer(gl::ARRAY_BUFFER, chunk.shadow_vbo);
+            gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(plant_mesh_.shadows.size() * sizeof(Vertex)),
+                           plant_mesh_.shadows.data(), gl::DYNAMIC_DRAW);
+            chunk.sprite_vertices = int(plant_mesh_.sprites.size());
+            chunk.shadow_vertices = int(plant_mesh_.shadows.size());
+            chunk.trees = plant_mesh_.trees;
+            chunk.tall = plant_mesh_.tall;
+            chunk.wide = plant_mesh_.wide;
+            chunk.built_tick = plant_start_tick_;
+            chunk.built_atlas = atlas_generation_;
+            building_ = nullptr;
+        }
+    } while (capture || Clock::now() < deadline);
+
+    return std::all_of(plant_chunks_.begin(), plant_chunks_.end(), [&](const Chunk* chunk) {
+        return chunk->built_atlas == atlas_generation_;
+    });
+}
+
+bool TiltView::draw_plants(const phd::World& world, const Camera& camera, const Font& font, int screen_w, int screen_h,
+                           int view_h, double time, bool capture) {
     font.white(white_u_, white_v_);
     sprites_drawn_ = 0;
     trees_ = 0;
@@ -848,48 +1068,20 @@ void TiltView::draw_plants(const phd::World& world, const Camera& camera, const 
         }
         plant_chunks_.push_back(&chunk);
     }
-    if (plant_chunks_.empty()) {
-        return;
-    }
     // A full atlas is emptied now and then, so sprites nothing uses any more
     // (last season's colours, plants that have grown) make room.
     if (atlas_full_ && ++frames_full_ > 600) {
         frames_full_ = 0;
         reset_atlas();
     }
-    // Bring them up to date: all that have never been built, and two a frame
-    // of those the world has moved on from, in turn.
-    const auto count = unsigned(plant_chunks_.size());
-    {
-        int refreshed = 0;
-        for (unsigned k = 0; k < count; ++k) {
-            Chunk& chunk = *plant_chunks_[(plant_cursor_ + k) % count];
-            const bool unbuilt = chunk.built_atlas != atlas_generation_;
-            if (!unbuilt && (chunk.built_tick == world.tick() || refreshed >= 2)) {
-                continue;
-            }
-            refreshed += !unbuilt;
-            build_plants(world, chunk);
-            chunk.built_tick = world.tick();
-            chunk.built_atlas = atlas_generation_;
-            chunk.tall = tallest_;
-            chunk.wide = widest_;
-            chunk.sprite_vertices = int(sprite_scratch_.size());
-            chunk.shadow_vertices = int(shadow_scratch_.size());
-            gl::BindBuffer(gl::ARRAY_BUFFER, chunk.sprite_vbo);
-            gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(sprite_scratch_.size() * sizeof(SpriteVertex)),
-                           sprite_scratch_.data(), gl::DYNAMIC_DRAW);
-            gl::BindBuffer(gl::ARRAY_BUFFER, chunk.shadow_vbo);
-            gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(shadow_scratch_.size() * sizeof(Vertex)),
-                           shadow_scratch_.data(), gl::DYNAMIC_DRAW);
-        }
-    }
-    plant_cursor_ += 2;
+    const bool ready = update_plants(world, camera, capture);
 
-    // The test tree, standing with the rest.
-    sprite_scratch_.clear();
-    if (scene_) {
-        add_tree(scene_x_, scene_y_, 2.7f, 0.81f, false, false, 88, 136, 56, 7342u);
+    // Give the world plants their atlas slots before inserting the test tree,
+    // just as in a full capture. Once painted it can draw during later pans.
+    scene_plants_.clear();
+    if (scene_ && (ready || scene_tree_atlas_ == atlas_generation_)) {
+        add_tree(scene_plants_, scene_x_, scene_y_, 2.7f, 0.81f, false, false, 88, 136, 56, 7342u);
+        scene_tree_atlas_ = atlas_generation_;
     }
 
     // Shadows first, on the ground, with the terrain's program.
@@ -899,7 +1091,7 @@ void TiltView::draw_plants(const phd::World& world, const Camera& camera, const 
     gl::EnableVertexAttribArray(1);
     gl::EnableVertexAttribArray(2);
     for (const Chunk* chunk : plant_chunks_) {
-        if (!chunk->shadow_vertices) {
+        if (chunk->built_atlas != atlas_generation_ || !chunk->shadow_vertices) {
             continue;
         }
         gl::BindBuffer(gl::ARRAY_BUFFER, chunk->shadow_vbo);
@@ -945,20 +1137,22 @@ void TiltView::draw_plants(const phd::World& world, const Camera& camera, const 
         sprites_drawn_ += vertices / 6;
     };
     for (const Chunk* chunk : plant_chunks_) {
+        if (chunk->built_atlas != atlas_generation_) continue;
         draw_sprites(chunk->sprite_vbo, chunk->sprite_vertices);
         trees_ += chunk->trees;
     }
-    if (!sprite_scratch_.empty()) {
+    if (!scene_plants_.sprites.empty()) {
         gl::BindBuffer(gl::ARRAY_BUFFER, scene_sprite_vbo_);
-        gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(sprite_scratch_.size() * sizeof(SpriteVertex)),
-                       sprite_scratch_.data(), gl::STREAM_DRAW);
-        draw_sprites(scene_sprite_vbo_, int(sprite_scratch_.size()));
+        gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(scene_plants_.sprites.size() * sizeof(SpriteVertex)),
+                       scene_plants_.sprites.data(), gl::STREAM_DRAW);
+        draw_sprites(scene_sprite_vbo_, int(scene_plants_.sprites.size()));
     }
     gl::UseProgram(program_);
+    return ready;
 }
 
-void TiltView::draw(const phd::World& world, const Camera& camera, const Texture& terrain, const Font& font,
-                    int screen_w, int screen_h, int view_h, double time) {
+bool TiltView::draw(const phd::World& world, const Camera& camera, const Texture& terrain, const Font& font,
+                    int screen_w, int screen_h, int view_h, double time, bool capture) {
     draw_calls_ = 0;
     triangles_ = 0;
     gl::Enable(gl::DEPTH_TEST);
@@ -995,10 +1189,7 @@ void TiltView::draw(const phd::World& world, const Camera& camera, const Texture
     const auto sun = art::sun_for(world);
     gl::Uniform3f(u_sun_, sun.x, sun.y, sun.z);
     gl::Uniform1f(u_lit_, 1);
-    if (bank_texture_.id) {
-        gl::ActiveTexture(gl::TEXTURE0 + 1);
-        gl::BindTexture(gl::TEXTURE_2D, bank_texture_.id);
-    }
+    const bool ground_ready = !shoreline_study_ || update_ground(world, camera, screen_w, view_h, capture);
     gl::ActiveTexture(gl::TEXTURE0);
     gl::BindTexture(gl::TEXTURE_2D, terrain.id);
     int caught_up = 0;
@@ -1012,7 +1203,7 @@ void TiltView::draw(const phd::World& world, const Camera& camera, const Texture
             continue;
         }
         // What is on screen follows the water at once, a few chunks a frame.
-        if (chunk.stale && caught_up < 8) {
+        if (chunk.stale && (capture || caught_up < 8)) {
             ++caught_up;
             build_chunk(chunk);
         }
@@ -1024,9 +1215,7 @@ void TiltView::draw(const phd::World& world, const Camera& camera, const Texture
         triangles_ += chunk.indices / 3;
     }
 
-    if (shoreline_study_) {
-        draw_plants(world, camera, font, screen_w, screen_h, view_h, time);
-    }
+    const bool plants_ready = !shoreline_study_ || draw_plants(world, camera, font, screen_w, screen_h, view_h, time, capture);
     build_scene(world, camera, font, time, screen_w, view_h);
     if (!scene_vertices_.empty()) {
         gl::Uniform1f(u_lit_, 0);
@@ -1041,6 +1230,7 @@ void TiltView::draw(const phd::World& world, const Camera& camera, const Texture
     }
     gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, 0);
     gl::Disable(gl::DEPTH_TEST);
+    return ground_ready && plants_ready;
 }
 
 } // namespace gfx

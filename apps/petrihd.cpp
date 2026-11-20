@@ -320,6 +320,8 @@ int main(int argc, char** argv) {
         return cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height() ? -1 : cy * world.width() + cx;
     };
     std::vector<double> frame_samples;
+    int detail_ready_frame = 0;
+    double bench_start = 0, detail_ready_ms = 0;
     // Where zooming is centred: the pointer that last scrolled or pinched.
     float zoom_anchor_x = float(width) / 2, zoom_anchor_y = float(view_height) / 2;
     float pinch_zoom = 0;
@@ -333,6 +335,7 @@ int main(int argc, char** argv) {
 
     while (running) {
         const double frame_start = now_seconds();
+        if (bench_frames && frame_samples.empty()) bench_start = frame_start;
         int window_w = width, window_h = height;
         SDL_GetWindowSize(window, &window_w, &window_h);
         const float input_x = float(width) / float(std::max(1, window_w));
@@ -486,7 +489,11 @@ int main(int argc, char** argv) {
             const double ms = (now_seconds() - sim_start) * 1000.0 / done;
             tick_ms = tick_ms == 0 ? ms : tick_ms * 0.9 + ms * 0.1;
         }
-        view.refresh(world, camera, width, view_height, bake_budget_seconds, tilt_enabled && camera.tilted());
+        const bool tilted = tilt_enabled && camera.tilted();
+        const bool capture = !shot.empty();
+        // The painted study needs at most one coarse chunk per interactive frame.
+        const double bake_budget = shoreline_study && tilted ? 0.0 : bake_budget_seconds;
+        const bool terrain_ready = view.refresh(world, camera, width, view_height, bake_budget, tilted, capture);
         if (frame_start - last_save > autosave_seconds) {
             save();
         }
@@ -494,17 +501,18 @@ int main(int argc, char** argv) {
         // Drawing.
         int drawable_w = width, drawable_h = height;
         SDL_GL_GetDrawableSize(window, &drawable_w, &drawable_h);
-        const bool tilted = tilt_enabled && camera.tilted();
         const Camera art_camera = camera.for_target(float(pixel));
+        bool scene_ready = true;
         target.begin();
         if (tilted) {
-            if (++tilt_frame % 15 == 0) {
+            if (++tilt_frame % 15 == 0 || capture) {
                 tilt.refresh(world, 2);
             }
             if (shoreline_study && speed != 0) {
                 study_animation += dt;
             }
-            tilt.draw(world, art_camera, view.terrain(), font, art_w, art_h, art_h, shoreline_study ? study_animation : frame_start);
+            scene_ready = tilt.draw(world, art_camera, view.terrain(), font, art_w, art_h, art_h,
+                                    shoreline_study ? study_animation : frame_start, capture);
         } else {
             batch.begin(art_w, art_h);
             view.draw(batch, font, world, art_camera, art_w, art_h, frame_start);
@@ -610,6 +618,10 @@ int main(int argc, char** argv) {
         frame_ms = (now_seconds() - frame_start) * 1000.0;
         if (bench_frames) {
             frame_samples.push_back(frame_ms);
+            if (!detail_ready_frame && terrain_ready && scene_ready) {
+                detail_ready_frame = int(frame_samples.size());
+                detail_ready_ms = (frame_start - bench_start) * 1000.0 + frame_ms;
+            }
             if (int(frame_samples.size()) >= bench_frames) {
                 std::vector<double> sorted = frame_samples;
                 std::sort(sorted.begin(), sorted.end());
@@ -617,11 +629,14 @@ int main(int argc, char** argv) {
                 for (const double v : sorted) {
                     sum += v;
                 }
-                std::printf("frames=%zu frame_ms_mean=%.2f frame_ms_p99=%.2f frame_ms_max=%.2f tick_ms=%.3f bake_ms=%.2f "
-                            "ticks=%" PRIu64 " triangles=%d sprites=%d draws=%d\n",
+                std::printf("frames=%zu frame_ms_mean=%.2f frame_ms_p99=%.2f frame_ms_max=%.2f tick_ms=%.3f bake_ms=%.2f ground_ms=%.2f ground_ms_max=%.2f "
+                            "ticks=%" PRIu64 " triangles=%d sprites=%d draws=%d atlas=%d%s "
+                            "frame_ms_first=%.2f detail_ready_frame=%d detail_ready_ms=%.2f bake_chunks_last=%d\n",
                             sorted.size(), sum / double(sorted.size()), sorted[sorted.size() * 99 / 100], sorted.back(),
-                            tick_ms, view.bake_ms(), world.tick(), tilted ? tilt.triangles() : 0,
-                            tilted ? tilt.sprites() : 0, tilted ? tilt.draw_calls() : 0);
+                            tick_ms, view.bake_ms(), tilt.ground_ms(), tilt.ground_ms_max(), world.tick(), tilted ? tilt.triangles() : 0,
+                            tilted ? tilt.sprites() : 0, tilted ? tilt.draw_calls() : 0, tilt.atlas_sprites(),
+                            tilt.atlas_full() ? " (full)" : "", frame_samples.front(), detail_ready_frame,
+                            detail_ready_ms, view.chunks_per_frame());
                 running = false;
             }
         }

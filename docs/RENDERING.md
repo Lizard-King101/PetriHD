@@ -15,11 +15,17 @@ true slopes too.
 
 ## Two paths, one texture
 
-The terrain is baked on the CPU at 4 texels per cell (`gfx/terrain_art.cpp`),
-16-cell chunks at a time within 3 ms per frame, those on screen first.
-Each chunk is also averaged down to 2 texels and 1 texel per cell; the
-zoomed-out view draws whichever level gives about one texel per pixel, so
-small things like tree crowns don't flicker in and out as the camera moves.
+The first frame can show the whole world from its biome colours. The CPU
+then paints the 16-cell chunks on screen at 4 texels per cell, starting
+near the camera focus (`gfx/terrain_art.cpp`). Each chunk is also averaged
+down to 2 and 1 texel per cell. The zoomed-out view draws the level closest
+to one texel per pixel to keep small shapes such as tree crowns stable.
+
+Each chunk records the world tick and lighting mode it was painted for.
+The overview spends up to about 3 ms per frame on pending chunks, finishing
+the current chunk before it yields. Chunks that already have detail refresh
+oldest first as the simulation plays. A paused view finishes any outstanding
+work, then reuses its terrain and weather textures.
 
 - **Ground and plants are separate layers.** The ground's colour comes from
   what it's made of (loam, sand, clay, peat, rock or gravel) and how wet it
@@ -46,8 +52,8 @@ in place. Tilting turns about the ground at the focus, not about sea level.
 - **Lighting:** the flat bake hill-shades from the sun. Tilted, the bake skips
   that and the shader lights the mesh from its own normals, with the same
   formula and slope scale (`art::shade_metres`), so the change at 32 px per
-  cell keeps the same shading. When the path switches, what is on screen is
-  rebaked at once.
+  cell keeps the same shading. Chunks visible after a switch get the new
+  lighting within the usual painting budget.
 - **Trees change level of detail at 32 px per cell.** Flat, they are baked
   crowns. Tilted, the bake leaves the crowns out and paints forest floor
   (leaf litter, needles) where they were, and the tilted view stands real
@@ -57,6 +63,32 @@ in place. Tilting turns about the ground at the focus, not about sea level.
 - **Objects:** the test tree and the six-legged test creature are built each
   frame from flat-shaded boxes and frustums. They stand on `TiltView::ground`,
   which follows the mesh's own triangles, so feet stay on the drawn surface.
+
+## One palette, one ground
+
+Every view takes its colours from `gfx/palette.hpp`: substrates, the water
+ramp, leaf pigments with their seasons, the five foliage tones, petals,
+snow and ash. The ground itself is one painting, `gfx/ground_art.cpp`, at 32
+texels per cell. The close view shows it whole; the bird's-eye bake takes one
+texel of it for each of its own (4 per cell) and adds tree crowns, bushes,
+flowers and hill shading. Zooming in changes the detail, not the colours.
+
+![The study, the same place from above, a forest across the map, and an autumn night](images/ground_everywhere.png)
+
+- **What is painted:** soil by substrate, low growth in the pigment of the
+  plants standing there, forest floor under canopy, the wet margin and the
+  pale waterline, the bed through shallows, deepening water, ice, snow,
+  burnt ground, then pebbles, blades of grass and glints.
+- **Ground cache.** With `--shoreline-study` the close view keeps a wrapping
+  2048 × 2048 texture covering 64 cells square. A 16 × 16 validity map tells
+  the shader which 4 × 4-cell patches belong to the current window. Other
+  patches show the overview texture until their detailed paint arrives.
+- **Painting budget.** The renderer fills one missing patch per frame, nearest
+  the focus first, including after a jump across the map. Once the view is
+  filled, it checks patches after a world tick and can repaint one changed
+  patch every other frame. The two texture resolutions update together.
+- **Below 45 px per cell** a half-size copy (16 texels per cell) is drawn,
+  so there is still one texel to a pixel.
 
 ## Plant sprites (shoreline study)
 
@@ -87,9 +119,11 @@ the three-quarter camera, at 32 texels per cell: one texel per art pixel at
   Because a crown's depth comes from where it hangs, the taller tree is on
   top when seen from above. Bushes hang from their middles for the same
   reason. Grass and reeds keep one height at every pitch.
-- **Caching:** quads and shadows are kept per 16-cell chunk and rebuilt only
-  when the world has ticked, two chunks a frame. Nothing is rebuilt while
-  paused.
+- **Foliage cache.** Quads and shadows share a 32-cell chunk. A build can
+  resume across frames, checking a 1.5 ms budget after at most four cells.
+  New chunks near the focus take priority. A refresh keeps drawing the
+  previous complete buffers until the new sprites and shadows are ready.
+  Moving away cancels an unfinished off-screen build.
 - **Wind:** the shader shifts each quad's top corners by whole texels, each
   plant on its own beat.
 
@@ -126,6 +160,14 @@ concept art. The interface stays at full resolution on top.
 | `--pixel N` | Screen pixels per art pixel (default 2; 1 turns the grid off) |
 
 ## Results on the PC
+
+`--frames` measures from the start of the frame through draw submission,
+before buffer swap. `frame_ms_first` includes cold-cache work inside that
+frame. `detail_ready_frame` is the first frame with all visible ground
+and foliage detail present, and `detail_ready_ms` is elapsed time to that
+frame at the uncapped benchmark speed. Both read zero if the run ends
+earlier. `bake_chunks_last` counts overview chunks rebaked on the final
+frame. Screenshots finish visible work for the requested tick before readback.
 
 Seed 1, tick 1,620 (day 7, summer, evening). Each row of the contact sheet is
 one place at 32, 64, 128 and 256 px per cell: a mountainside, a lake shore,

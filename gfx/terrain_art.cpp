@@ -3,17 +3,16 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ground_art.hpp"
 #include "math.hpp"
+#include "palette.hpp"
 
 namespace art {
 namespace {
 
-struct Rgb {
-    float r, g, b;
-};
-
-Rgb mix(Rgb a, Rgb b, float t) { return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t}; }
-Rgb scale(Rgb a, float s) { return {a.r * s, a.g * s, a.b * s}; }
+using palette::mix;
+using palette::Rgb;
+using palette::scale;
 
 const Rgb biome_colors[phd::biome_count] = {
     {226, 236, 242}, {150, 150, 118}, {58, 92, 68},   {122, 152, 96},  {148, 143, 138}, // cold
@@ -23,49 +22,6 @@ const Rgb biome_colors[phd::biome_count] = {
     {226, 212, 162}, {80, 176, 178},  {70, 196, 190}, {50, 120, 165},  {60, 135, 170},
     {30, 85, 145},   {14, 34, 82},                                                     // water
 };
-
-// What the ground is made of, before anything grows on it.
-const Rgb substrate_colors[int(phd::Substrate::count)] = {
-    {112, 88, 60},   // loam
-    {214, 196, 148}, // sand
-    {150, 112, 82},  // clay
-    {72, 58, 46},    // peat
-    {128, 124, 118}, // rock
-    {150, 140, 122}, // gravel
-};
-
-// A plant's colour now: its leaf gene from yellow-green to blue-green, then
-// the season: autumn colour and bare winter branches for deciduous plants,
-// straw for dormant grass, browning when it is failing.
-Rgb leaf_rgb(const phd::Plant& p, const phd::World& world) {
-    const auto& g = p.genome.gene;
-    const float leaf = float(g[phd::gene_leaf]) / 255.0f;
-    Rgb c = leaf < 0.5f ? mix({152, 170, 66}, {74, 140, 56}, leaf * 2) : mix({74, 140, 56}, {46, 104, 84}, leaf * 2 - 1);
-    if (phd::woody(p.genome)) {
-        c = scale(c, 0.8f);
-    }
-    const int t = world.temperature(std::size_t(p.cell));
-    if (!phd::evergreen(p.genome)) {
-        if (p.flags & phd::plant_dormant) {
-            c = phd::woody(p.genome) ? Rgb{112, 98, 86} : Rgb{176, 158, 104};
-        } else if (world.season() == 2 && t < 150) {
-            // Autumn: yellow, orange or red by the plant's flower gene.
-            const Rgb turn = g[phd::gene_flower] < 85 ? Rgb{222, 182, 62} : g[phd::gene_flower] < 170 ? Rgb{212, 118, 42}
-                                                                                                     : Rgb{172, 52, 40};
-            c = mix(c, turn, std::min(1.0f, float(150 - t) / 90.0f));
-        }
-    }
-    if (p.health < 140) {
-        c = mix(c, {150, 118, 70}, float(140 - p.health) / 200.0f);
-    }
-    return c;
-}
-
-Rgb flower_rgb(const phd::Plant& p) {
-    static const Rgb colours[6] = {{240, 240, 232}, {240, 210, 60}, {236, 150, 180}, {150, 100, 200}, {210, 60, 60},
-                                   {110, 140, 230}};
-    return colours[p.genome.gene[phd::gene_flower] * 6 / 256];
-}
 
 // Bilinear sample of a per-cell value at a point in cell units (centres at +0.5).
 template <class F> float sample(const phd::World& world, float x, float y, F value) {
@@ -84,24 +40,38 @@ template <class F> float sample(const phd::World& world, float x, float y, F val
     return top + (bottom - top) * fy;
 }
 
-Rgb water_rgb(float depth, phd::Water kind) {
-    const Rgb shallow{74, 172, 176}, mid{38, 112, 162}, deep{20, 62, 124}, abyss{12, 30, 74};
-    if (kind == phd::Water::river) {
-        return depth < 1.2f ? mix({84, 150, 150}, {52, 118, 150}, depth / 1.2f) : Rgb{46, 108, 148};
+} // namespace
+
+namespace palette {
+
+Rgb leaf(const phd::Plant& p, const phd::World& world) {
+    const auto& g = p.genome.gene;
+    const float amount = float(g[phd::gene_leaf]) / 255.0f;
+    constexpr Rgb yellow{150, 158, 66}, green{100, 130, 58}, blue{62, 106, 74};
+    Rgb c = amount < 0.5f ? mix(yellow, green, amount * 2) : mix(green, blue, amount * 2 - 1);
+    if (phd::woody(p.genome)) {
+        c = {c.r * 0.7f, c.g * 0.82f, c.b * 0.8f}; // woody leaves are darker and greener
     }
-    if (depth < 0.5f) {
-        return shallow;
+    const int t = world.temperature(std::size_t(p.cell));
+    if (!phd::evergreen(p.genome)) {
+        if (p.flags & phd::plant_dormant) {
+            c = phd::woody(p.genome) ? Rgb{112, 98, 86} : Rgb{176, 158, 104};
+        } else if (world.season() == 2 && t < 150) {
+            // Autumn: yellow, orange or red by the plant's flower gene.
+            const Rgb turn = g[phd::gene_flower] < 85 ? Rgb{222, 182, 62} : g[phd::gene_flower] < 170 ? Rgb{212, 118, 42}
+                                                                                                     : Rgb{172, 52, 40};
+            c = mix(c, turn, std::min(1.0f, float(150 - t) / 90.0f));
+        }
     }
-    if (depth < 3) {
-        return mix(shallow, mid, (depth - 0.5f) / 2.5f);
+    if (p.health < 140) {
+        c = mix(c, {150, 118, 70}, float(140 - p.health) / 200.0f);
     }
-    if (depth < 12) {
-        return mix(mid, deep, (depth - 3) / 9);
-    }
-    return mix(deep, abyss, std::min(1.0f, (depth - 12) / 60));
+    return c;
 }
 
-} // namespace
+Rgb flower(const phd::Plant& p) { return petals[p.genome.gene[phd::gene_flower] * 6 / 256]; }
+
+} // namespace palette
 
 Tree tree_in(const phd::World& world, int cx, int cy) {
     Tree tree;
@@ -119,7 +89,7 @@ Tree tree_in(const phd::World& world, int cx, int cy) {
     tree.y = float(cy) + 0.3f + float(h >> 8 & 255) / 255.0f * 0.4f;
     tree.radius = float(phd::crown16(p->height)) / 16.0f;
     tree.height = float(p->height) / float(phd::cell_decimetres);
-    const Rgb c = leaf_rgb(*p, world);
+    const Rgb c = palette::leaf(*p, world);
     tree.r = std::uint8_t(std::min(255.0f, c.r));
     tree.g = std::uint8_t(std::min(255.0f, c.g));
     tree.b = std::uint8_t(std::min(255.0f, c.b));
@@ -165,13 +135,7 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
     const float inv = 1.0f / float(texels_per_cell);
     // In metres.
     const auto elevation = [&](std::size_t i) { return float(terrain.elevation[i]) / 10; };
-    const auto surface = [&](std::size_t i) {
-        return world.water(i) == phd::Water::none    ? float(terrain.elevation[i]) / 10
-               : world.water(i) == phd::Water::ocean ? 0.0f
-                                                     : float(terrain.elevation[i] + world.water_depth_dm(i)) / 10;
-    };
     const auto snow = [&](std::size_t i) { return float(world.snow(i)); };
-    const auto soil = [&](std::size_t i) { return float(world.soil_water(i)); };
 
     // The trees that can reach this region: every cell's, two cells around it.
     const int rx0 = tx0 / texels_per_cell - 2, ry0 = ty0 / texels_per_cell - 2;
@@ -209,6 +173,9 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
         }
     }
 
+    std::vector<std::uint8_t> ground_rgb(std::size_t(w) * h * 3), ground_water(std::size_t(w) * h);
+    ground::sample(world, tx0, ty0, w, h, texels_per_cell, ground_rgb.data(), ground_water.data());
+
     for (int ty = ty0; ty < ty0 + h; ++ty) {
         auto* out = rgb + std::size_t(ty - ty0) * std::size_t(stride);
         for (int tx = tx0; tx < tx0 + w; ++tx, out += 3) {
@@ -218,51 +185,23 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
             const auto noise = phd::hash2(tx, ty);
             const float grain = float(int(noise & 15) - 8) / 255.0f;
 
-            const float ground = sample(world, x, y, elevation);
-            const float depth = sample(world, x, y, surface) - ground;
-            Rgb c;
+            // The ground and the water are the close view's painting, one
+            // texel of it for each of these.
+            const auto* painted = &ground_rgb[(std::size_t(ty - ty0) * w + (tx - tx0)) * 3];
+            Rgb c{float(painted[0]), float(painted[1]), float(painted[2])};
             float shade = 1;
-            if (depth > 0.08f) {
-                const auto kind = world.water(cell) == phd::Water::none ? phd::Water::river : world.water(cell);
-                c = water_rgb(depth, kind);
-                if (depth < 0.8f && kind != phd::Water::river) {
-                    // Sand shows through the shallows; foam at the very edge.
-                    c = mix({206, 194, 146}, c, (depth - 0.08f) / 0.72f);
-                    if (depth < 0.2f && (noise & 3) != 0) {
-                        c = mix(c, {236, 240, 236}, 0.6f);
-                    }
-                }
-                if (world.temperature(cell) < -20 && (kind != phd::Water::ocean || depth < 3)) {
-                    c = mix(c, {204, 222, 236}, (noise & 31) == 0 ? 0.6f : 0.85f);
-                }
-                c = scale(c, 1.0f + grain * 0.5f);
-            } else {
-                // The ground: what it is made of, darker when wet.
-                const auto ground = world.substrate(cell);
-                c = substrate_colors[int(ground)];
-                const float patch = float(phd::value_noise(tx, ty, 24, 0x68e31da4u) - 32768) / 32768.0f;
-                c = scale(c, 1.0f + patch * 0.06f + grain * 1.5f);
-                const float wet = sample(world, x, y, soil);
-                c = scale(c, 1.0f - std::max(0.0f, wet - 90) / 255.0f * 0.35f);
-
-                // Low plants: each of the cell's four slots is a quarter of it,
-                // 2 x 2 texels, covered as fully as the plant is tall, in its
-                // own colour, with flowers in spring.
+            if (!ground_water[std::size_t(ty - ty0) * w + (tx - tx0)]) {
+                // Bushes stand out from the turf as darker clumps, in their
+                // sprites' tones; low plants in bloom show a few flowers.
                 const int slot = (tx % texels_per_cell >= texels_per_cell / 2) + 2 * (ty % texels_per_cell >= texels_per_cell / 2);
                 const phd::Plant* low = world.tree(cell) ? nullptr : world.occupant(cell, slot);
-                if (low) {
+                if (low && phd::woody(low->genome) && low->height >= 4) {
                     const float clumps = float(phd::value_noise(tx, ty, 3, 0x1b873593u)) / 65535.0f;
-                    const float cover = std::min(1.0f, 0.35f + float(low->height) / 8.0f);
-                    if (clumps < cover) {
-                        Rgb green = scale(leaf_rgb(*low, world), 0.92f + float(noise >> 4 & 15) / 15.0f * 0.16f);
-                        if (phd::woody(low->genome)) {
-                            green = scale(green, (noise >> 9 & 3) == 0 ? 0.75f : 1.0f); // shrubs: darker clumps
-                        }
-                        c = green;
-                        if ((low->flags & phd::plant_flowering) && (noise >> 12 & 7) == 0) {
-                            c = flower_rgb(*low);
-                        }
+                    if (clumps < std::min(0.85f, 0.3f + float(low->height) / 12.0f)) {
+                        c = palette::leaf_tone(palette::leaf(*low, world), (noise >> 9 & 3) == 0 ? 1.3f : 2.1f + float(noise >> 4 & 15) / 15.0f);
                     }
+                } else if (low && (low->flags & phd::plant_flowering) && (noise >> 12 & 15) == 0) {
+                    c = palette::flower(*low);
                 }
 
                 // Trees: round crowns rooted in nearby cells, lit like domes,
@@ -283,14 +222,16 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                 if (top && !flat) {
                     // Forest floor under a tree the tilted view stands up:
                     // leaf litter and needles, shaded, with a little green.
-                    c = mix(c, (noise >> 12 & 7) == 0 ? Rgb{78, 98, 52} : Rgb{86, 68, 46}, 0.75f);
+                    c = mix(c, (noise >> 12 & 7) == 0 ? Rgb{78, 98, 52} : palette::litter, 0.75f);
                     c = scale(c, 0.8f + grain * 2);
                     top = nullptr;
                 } else if (top) {
                     const float dx = (x - top->x) / top->radius, dy = (y - top->y) / top->radius;
                     const float dz = std::sqrt(std::max(0.0f, 1 - dx * dx - dy * dy));
                     const float lit = dx * sun.x + dy * sun.y + dz * sun.z;
-                    c = scale(Rgb{float(top->r), float(top->g), float(top->b)}, 0.62f + 0.5f * std::max(0.0f, lit) + grain * 2);
+                    // The tones of its sprite, from shade to highlight.
+                    c = palette::leaf_tone({float(top->r), float(top->g), float(top->b)},
+                                           1.3f + 1.9f * std::max(0.0f, lit) + grain * 8);
                     if (top->bare && (noise >> 6 & 3) != 0) {
                         c = scale(c, 0.7f); // bare branches: the ground shows through
                     }
@@ -301,17 +242,17 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                     c = scale(c, 0.68f); // the tilted view casts its own shadows
                 }
 
-                const float s = sample(world, x, y, snow);
+                const float s = top ? sample(world, x, y, snow) : 0;
                 if (s > 20) {
                     const float lying = std::min(1.0f, (s - 20) / 70.0f);
                     if (float(noise >> 8 & 255) / 255.0f < lying * 1.3f) {
-                        c = mix(c, {238, 242, 248}, std::min(1.0f, lying + (top ? 0.0f : 0.3f)));
+                        c = mix(c, palette::snow, std::min(1.0f, lying + (top ? 0.0f : 0.3f)));
                     }
                 }
                 // Burnt ground: char and ash, fading as it recovers.
-                if (const int burnt = world.burnt(cell)) {
+                if (const int burnt = top ? world.burnt(cell) : 0) {
                     const float b = float(burnt) / 255.0f;
-                    c = mix(c, (noise >> 14 & 7) == 0 ? Rgb{150, 146, 140} : Rgb{44, 38, 34}, b * (top ? 0.4f : 0.85f));
+                    c = mix(c, (noise >> 14 & 7) == 0 ? palette::ash : palette::charred, b * (top ? 0.4f : 0.85f));
                 }
                 // Hill shading: slopes facing the sun are lit, the others shaded.
                 if (hill_shade && !top) {

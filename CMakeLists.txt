@@ -20,7 +20,7 @@ add_library(petrihd_core core/world.cpp core/terrain.cpp core/plants.cpp core/fi
 target_include_directories(petrihd_core PUBLIC core)
 
 # Terrain art: no GL, so headless screenshots match the window.
-add_library(petrihd_art gfx/terrain_art.cpp gfx/plant_sprites.cpp)
+add_library(petrihd_art gfx/terrain_art.cpp gfx/plant_sprites.cpp gfx/ground_art.cpp)
 target_include_directories(petrihd_art PUBLIC gfx)
 target_link_libraries(petrihd_art PUBLIC petrihd_core)
 
@@ -29,6 +29,9 @@ target_link_libraries(petrihd-run PRIVATE petrihd_art)
 
 add_executable(petrihd-sprites tools/sprite_sheet.cpp)
 target_link_libraries(petrihd-sprites PRIVATE petrihd_art)
+
+add_executable(petrihd-ground tools/ground_sheet.cpp)
+target_link_libraries(petrihd-ground PRIVATE petrihd_art)
 
 enable_testing()
 add_executable(petrihd_core_tests tests/core_test.cpp)
@@ -40,8 +43,7 @@ add_test(NAME camera COMMAND petrihd_camera_tests)
 
 if(PETRIHD_GUI)
     find_package(SDL2 REQUIRED)
-    add_library(petrihd_gfx gfx/gl.cpp gfx/batch.cpp gfx/font.cpp gfx/world_view.cpp gfx/tilt_view.cpp gfx/pixel_target.cpp
-                            gfx/shoreline_art.cpp)
+    add_library(petrihd_gfx gfx/gl.cpp gfx/batch.cpp gfx/font.cpp gfx/world_view.cpp gfx/tilt_view.cpp gfx/pixel_target.cpp)
     target_include_directories(petrihd_gfx PUBLIC gfx ui)
     target_link_libraries(petrihd_gfx PUBLIC SDL2::SDL2 petrihd_art)
 

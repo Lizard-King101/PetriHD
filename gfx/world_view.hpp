@@ -23,11 +23,10 @@ public:
     static constexpr int chunk_cells = 16;
 
     bool init(const phd::World& world);
-    // Bakes chunks for up to `budget` seconds, those on screen first.
-    // Tilted, the terrain is baked without hill shading, since the tilted
-    // view lights its own slopes; switching rebakes what is on screen at once.
-    void refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, double budget, bool tilted);
-    void bake_everything(const phd::World& world);
+    // Returns true once every visible chunk has detail for this lighting mode.
+    // A capture finishes all visible work for the requested tick.
+    bool refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, double budget,
+                 bool tilted, bool capture = false);
     void draw(Batch& batch, const Font& font, const phd::World& world, const Camera& camera, int view_w, int view_h,
               double time);
 
@@ -36,16 +35,28 @@ public:
     int chunks_per_frame() const { return chunks_last_; }
 
 private:
-    void bake_chunk(const phd::World& world, const art::Sun& sun, int chunk);
+    void bake_chunk(const phd::World& world, const art::Sun& sun, int chunk, bool flat);
     void update_sky(const phd::World& world);
 
     // The terrain at 4 texels per cell, and averaged down to 2 and 1, so the
     // zoomed-out view samples one texel per pixel and small things don't blink.
     Texture terrain_, terrain_half_, terrain_quarter_, clouds_, fog_;
-    int chunks_x_ = 0, chunks_y_ = 0, next_ = 0;
-    bool shaded_ = true;
+    enum class Lighting { preview, flat, tilted };
+    struct BakedChunk {
+        std::uint64_t tick = 0;
+        Lighting lighting = Lighting::preview;
+    };
+    struct BakeJob {
+        int chunk;
+        bool needs_detail;
+        std::uint64_t tick;
+        float distance;
+    };
+    int chunks_x_ = 0, chunks_y_ = 0;
+    std::uint64_t sky_tick_ = 0;
+    std::vector<BakedChunk> baked_;
     std::vector<std::uint8_t> chunk_rgb_, half_rgb_, quarter_rgb_, cloud_rgba_, fog_rgba_;
-    std::vector<int> visible_;
+    std::vector<BakeJob> pending_;
     double bake_ms_ = 0;
     int chunks_last_ = 0;
 };

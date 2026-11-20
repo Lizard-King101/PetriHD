@@ -19,7 +19,7 @@ Measured on a desktop PC (NVIDIA GPU, vsync off, 800 × 480 window, art target
 | Foliage cost | Does not work: 223,000 triangles rebuilt and uploaded every frame |
 | Pixel size consistency | Does not work: leaf pixels scale with the plant and the zoom |
 | Variety | Does not work: two leaf patterns for every plant |
-| Ground outside the patch | Does not work: falls back to 4-texel blocks with hard seams |
+| Ground outside the patch | Did not work at the time of the review; see Progress |
 | Grass, reeds and flowers | Wrong style: smooth triangles, not pixels |
 | Shadows, trunks, creature, water | Placeholders |
 | Ground staying current | Does not work: painted once at startup |
@@ -246,3 +246,95 @@ painted, rigged sprite.
   every pitch, and a crown is the same picture from above as from the side.
 
 ![36, 64, 128 and 256 px per cell](images/shoreline_pitch.png)
+
+**Ground everywhere, and one palette (step 3).**
+
+| Run | Mean frame | Ground painting |
+| --- | --- | --- |
+| Paused, zoom 64 | 0.9 ms | none after the first frame |
+| Playing, zoom 64 | 1.4 ms | 0.1-0.3 ms a frame |
+| Playing at 2×, zoom 64 | 2.0 ms | 0.9 ms a frame |
+| Playing, tick 6,000, dense forest | 1.6 ms | 0.5 ms a frame |
+| First frame | 85-130 ms | 52-60 ms of it |
+
+- **The ground is painted wherever the camera goes,** in 8-cell tiles kept
+  around the camera, and the fixed 24 × 24-cell patch is gone. Fixed: the
+  seam and the blocky fallback outside the patch, and low plants drawn
+  twice.
+- **It stays current.** Each quarter-tile is repainted when its water,
+  plants, snow, fire or season change, so the painted waterline follows the
+  lake as it fills.
+- **One palette.** The bird's-eye bake draws its ground from the same
+  painter and its crowns and bushes in the sprites' tones. Shrub and grass
+  sprites now take the plant's own colour, so they turn in autumn and go
+  to straw when dormant, as they do from above.
+- **The painter knows the whole world:** substrates, sea, ice, snow and
+  burnt ground, none of which the study patch had.
+- **The frame is cheaper than before this step** because the bird's-eye
+  bake, which the painting now covers, is held to one chunk a frame close
+  in.
+- **Found on the way: a full atlas could stall a frame for 12 seconds.** It
+  painted a sprite for every new plant only to find no room. A full atlas
+  now paints nothing until it is emptied, and `--frames` reports how many
+  sprites it holds and whether it is full. No scene measured fills it.
+- Still open: a painted tile costs about 6 ms on the PC, which is far too
+  much for the Pi as it stands; the bird's-eye view shows weather (rain,
+  cloud shadow) that the close view does not, so they differ on a wet day;
+  trees and bushes in flooded cells still ride the water surface; shadows,
+  water movement and the creature are untouched.
+
+## Spreading the first paint across frames
+
+The overview starts with biome colours. Visible chunks get detailed terrain
+in order of distance from the focus. Once a chunk has the right lighting
+for the current tick, its three texture levels are reused. The close view
+paints one missing 4 × 4-cell patch per interactive frame and builds foliage
+in resumable runs of up to four cells. Screenshots finish the visible work
+for their requested tick.
+
+These are elapsed milliseconds inside the frame loop on Windows with NVIDIA
+OpenGL ES, at 800 × 480 with a 400 × 224 art target. Each column gives the
+median of three runs per build, alternating between the original and revised
+executables. Vsync was off and timing ended before buffer swap. Both builds
+started seed 1 at tick 120. The overview used zoom 2, and both close views
+used zoom 64 at (186, 73). Normal playback advances with wall time, so a
+faster 1,200-frame run can finish at an earlier simulation tick.
+
+| Scene | Frames | Mean before | Mean after | p99 before | p99 after | Max before | Max after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Overview, paused | 1,200 | 3.60 | 0.90 | 4.13 | 3.72 | 5.54 | 4.06 |
+| Overview, playing | 1,200 | 3.69 | 3.70 | 6.34 | 6.61 | 8.58 | 8.66 |
+| Regular close view, playing | 1,200 | 3.94 | 0.74 | 6.89 | 2.42 | 8.24 | 8.16 |
+| Painted shoreline, playing | 1,200 | 1.31 | 1.15 | 4.04 | 4.74 | 125.45 | 8.40 |
+| Painted shoreline, paused | 600 | 0.89 | 0.80 | 1.70 | 4.54 | 131.85 | 7.26 |
+
+The separate one-frame shoreline run fell from **125.13 to 7.29 ms**.
+Ground painting and uploads in that frame fell from **60.29 to 1.87 ms**.
+The paused shoreline had its visible detail by frame 36, **139 ms** into
+the uncapped run. At a steady 60 Hz, 36 frames span about 0.6 seconds.
+The new shoreline p99 includes several frames of painting that the original
+build concentrated in its single slowest frame.
+
+The paused overview finished its detailed map by frame 56 and ended with
+zero chunk rebakes. Its mean above includes that initial painting. The
+original build paid for the initial overview bake before its frame timer
+started. At normal speed, each tick changes the world's lighting and can
+leave enough visible work to use the full overview budget.
+
+To reproduce the four 1,200-frame cases and the single cold frame, run the
+Release binary with these arguments.
+
+```sh
+petrihd --seed 1 --ticks 120 --zoom 2 --speed 0 --frames 1200
+petrihd --seed 1 --ticks 120 --zoom 2 --speed 1 --frames 1200
+petrihd --seed 1 --ticks 120 --zoom 64 --at 186,73 --speed 1 --frames 1200
+petrihd --shoreline-study --speed 1 --frames 1200
+petrihd --shoreline-study --speed 0 --frames 1
+```
+
+The one-shot images at zooms 40, 64 and 128 matched the original build
+pixel for pixel. So did settled frames before a drag, at the far bank and
+after dragging back at zooms 40 and 64. A separate route interrupted a
+partial build, crossed the wrapping texture boundary, switched between
+flat and tilted views, and advanced to autumn. All six settled views
+matched a forced refresh at the same camera and tick.

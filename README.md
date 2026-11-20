@@ -45,8 +45,11 @@ painted once from the plant's size, kind, colour and season
 of them without opening a window. What works and what doesn't is in
 [docs/SHORELINE_REVIEW.md](docs/SHORELINE_REVIEW.md). This study opens seed 1 at tick 120,
 centered on cell (186, 73), at 64 pixels per cell with a 55° camera pitch.
-The detailed ground is baked at startup for a 24 × 24-cell patch around the
-bank. Drag to pan, and scroll or pinch to zoom. The study starts paused. Press Space
+The ground is painted at the same density wherever the camera goes
+(`gfx/ground_art.cpp`), in the colours of the bird's-eye view, and repainted
+as water, plants and seasons change; `build/petrihd-ground ground.png` paints
+a piece of it without opening a window. `--at X,Y` opens the study anywhere
+on the map. Drag to pan, and scroll or pinch to zoom. The study starts paused. Press Space
 to play and watch the foliage and test creature move.
 
 Add `--shot shoreline.png` to capture the reference frame and exit. The

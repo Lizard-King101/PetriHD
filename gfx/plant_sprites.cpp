@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "math.hpp"
+#include "palette.hpp"
 
 namespace art::sprites {
 namespace {
@@ -43,17 +44,15 @@ std::uint32_t hash(int a, int b, std::uint32_t seed) { return phd::hash3(a, b, s
 
 using Tones = std::array<Rgb, 5>;
 
-// Five leaf tones from one pigment: deep shade, shade, body, lit, highlight.
-// Shade leans blue, light leans yellow.
-Tones leaf_tones(Rgb p) {
+// The palette's five leaf tones for a pigment: deep shade, shade, body, lit,
+// highlight.
+Rgb bytes(palette::Rgb c) {
     const auto b = [](float v) { return std::uint8_t(std::clamp(v, 0.0f, 255.0f)); };
-    return {{
-        {b(p.r * .29f + 8), b(p.g * .35f + 12), b(p.b * .44f + 13)},
-        {b(p.r * .42f + 12), b(p.g * .49f + 19), b(p.b * .43f + 12)},
-        {b(p.r * .60f + 24), b(p.g * .70f + 23), b(p.b * .46f + 11)},
-        {b(p.r * .88f + 37), b(p.g * .86f + 39), b(p.b * .49f + 9)},
-        {b(p.r * .92f + 63), b(p.g * .88f + 55), b(p.b * .50f + 16)},
-    }};
+    return {b(c.r), b(c.g), b(c.b)};
+}
+Tones leaf_tones(Rgb p) {
+    const auto t = palette::leaf_tones({float(p.r), float(p.g), float(p.b)});
+    return {{bytes(t[0]), bytes(t[1]), bytes(t[2]), bytes(t[3]), bytes(t[4])}};
 }
 
 constexpr Rgb bark_light{150, 112, 78}, bark_mid{112, 82, 57}, bark_dark{74, 54, 40};
@@ -407,17 +406,15 @@ Image paint(const Spec& spec) {
         const bool reed = spec.kind == Kind::reed;
         Canvas c(radius * 2 + 7, height + 4);
         const int ax = c.w / 2, bottom = c.h - 1;
-        const int hue = spec.r; // yellow-green to blue-green
-        const BladeTones green{{55, 74, 40},
-                               {std::uint8_t(93 - hue), 117, 51},
-                               {std::uint8_t(139 - hue), 158, 65},
-                               {std::uint8_t(180 - hue), 182, 77}};
+        // Blades from the plant's pigment: root, body, lit, tip.
+        const palette::Rgb p{float(spec.r), float(spec.g), float(spec.b)};
+        const BladeTones green{bytes(palette::scale(p, 0.56f)), bytes(palette::scale(p, 0.9f)),
+                               bytes({p.r * 1.25f + 8, p.g * 1.25f, p.b * 1.12f}),
+                               bytes({p.r * 1.45f + 28, p.g * 1.42f - 4, p.b * 1.3f})};
         const BladeTones straw{{109, 91, 49}, {142, 119, 65}, {178, 154, 91}, {203, 186, 128}};
-        static constexpr Rgb petals[] = {{239, 234, 196}, {236, 204, 92}, {212, 148, 174},
-                                         {163, 125, 187}, {211, 104, 91}, {152, 162, 210}};
         // Reeds carry seed heads whenever they are green; grasses flower in season.
         const bool heads = reed ? !is_bare : (spec.state & flowering) != 0;
-        clump(c, ax, bottom, height, radius, reed, is_bare ? straw : green, heads, petals[spec.flower % 6], seed);
+        clump(c, ax, bottom, height, radius, reed, is_bare ? straw : green, heads, bytes(palette::petals[spec.flower % 6]), seed);
         return finish(c, ax);
     }
     }
