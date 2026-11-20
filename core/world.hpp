@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <vector>
 
+#include "animals.hpp"
 #include "biome.hpp"
+#include "brain.hpp"
 #include "plants.hpp"
 #include "random.hpp"
 #include "terrain.hpp"
@@ -21,6 +23,7 @@ struct WorldConfig {
     // between summer and winter, in tenths of a degree C.
     int climate = 90;
     int seasons = 140;
+    Layout layout = Layout::valley;
 };
 
 enum class Water : std::uint8_t { none, ocean, lake, river };
@@ -57,6 +60,7 @@ public:
     static constexpr int max_fronts = 6;
     static constexpr int lightning_kept = 16;
     static constexpr int max_plants = 262144;
+    static constexpr int max_animals = 4096;
     static constexpr int plant_stagger = 16; // each plant grows every 16 ticks
 
     explicit World(const WorldConfig& config);
@@ -86,6 +90,7 @@ public:
     // The climate and water, per cell.
     Water water(std::size_t i) const { return Water(water_[i]); }
     int water_depth_dm(std::size_t i) const { return depth_[i]; } // decimetres
+    int lake_surface_dm(std::uint16_t id) const { return lake_surfaces_[id].stage; }
     int temperature(std::size_t i) const { return temperature_[i]; } // tenths of a degree C
     int soil_water(std::size_t i) const { return soil_[i]; }         // 0..255
     int moisture(std::size_t i) const { return moisture_[i] >> 8; }  // long-run soil water
@@ -99,6 +104,7 @@ public:
     int nodes_x() const { return nodes_x_; }
     int nodes_y() const { return nodes_y_; }
     int rain(int nx, int ny) const { return rain_[std::size_t(ny * nodes_x_ + nx)]; }
+    int rain_at(int x, int y) const; // local precipitation at a world cell, interpolated between weather nodes
     int cloud(int nx, int ny) const { return cloud_[std::size_t(ny * nodes_x_ + nx)]; }
     int wind_angle() const { return wind_angle_; }
     int wind_speed() const { return wind_speed_; } // 1/256 cell per tick
@@ -117,6 +123,16 @@ public:
         return p && p->slot == whole_cell ? p : nullptr;
     }
     const std::vector<Plant>& plant_pool() const { return plants_; }
+    // Animals: only the living, in no particular order.
+    const std::vector<Animal>& animals() const { return animals_; }
+    // Puts `count` founders into the world, each where its body can live.
+    void seed_animals(int count);
+    const brain::Brain& brain_of(std::size_t index) const { return brains_[index]; }
+    // What the animal at this index senses now.
+    brain::Senses senses(std::size_t index) const;
+    BrainMode brain_mode() const { return brain_mode_; }
+    const std::vector<Call>& calls() const { return calls_; }
+    void set_brain_mode(BrainMode mode) { brain_mode_ = mode; }
     std::size_t plant_count() const { return plants_.size() - free_.size(); }
     int canopy_height(std::size_t i) const { return canopy_height_[i]; } // dm, of the crowns over a cell
     int canopy_cover(std::size_t i) const { return canopy_cover_[i]; }   // 0..255
@@ -145,18 +161,26 @@ public:
 
 private:
     int temperature_at(std::size_t i, bool water) const;
-    int rain_at(int x, int y) const;
     void update_wind();
     void update_fronts();
+    void start_development_front(int duration);
+    int rasterize_front(const Front& front, int load, int boost);
+    void restore_weather_from_fronts();
     void update_soil(int row);
     void update_biomes(int row);
     void update_hydrology();
     void refresh_water();
+    void fill_flood_pockets();
+    int nominal_lake_surface_dm(std::size_t id) const;
+    void back_up_lakes();
     Biome classify(int x, int y) const;
 
     // Plants (plants.cpp).
     void seed_plants();
     void update_plants();
+    void update_animals();
+    void index_animals();
+    void refresh_forage();
     void grow_plant(std::uint32_t index);
     void reproduce(std::uint32_t index);
     bool establish(const PlantGenome& genome, std::uint32_t lineage, int cell, bool clone);
@@ -189,10 +213,18 @@ private:
     std::array<Lightning, lightning_kept> lightning_{};
     std::size_t lightning_next_ = 0;
 
-    // Scratch, rebuilt every tick or pass; not saved.
+    // The sky at the saved tick, including rain already released by the fronts.
     std::vector<std::uint8_t> rain_, cloud_;
-    std::vector<std::uint32_t> accumulated_;
+    // Scratch, rebuilt every tick or pass.
+    std::vector<std::uint32_t> accumulated_; // runoff, then the cell queue during flooding
     std::vector<std::uint32_t> lake_area_;
+    static constexpr int no_stream = 1 << 30;
+    struct LakeSurface {
+        int stage = 0;          // dm, including temporary river backwater
+        int lowest_river = 0;   // scratch while measuring the surrounding flood
+        int through = -no_stream; // dm: the surface of a stream running through it, if one does
+    };
+    std::vector<LakeSurface> lake_surfaces_;
     std::vector<std::uint8_t> previous_water_;
 
     std::vector<Plant> plants_;              // the pool
@@ -208,6 +240,22 @@ private:
     std::vector<std::uint8_t> fire_next_;    // scratch
     std::vector<std::uint8_t> burnt_;
     Random plant_rng_, fire_rng_;
+    std::vector<Animal> animals_;
+    std::vector<brain::Brain> brains_;       // parallel to animals_
+    BrainMode brain_mode_ = BrainMode::evolving;
+    // Scratch, rebuilt as animals move and plants grow: who is in each cell
+    // (a list through animal_next_), and the grazing there.
+    std::vector<std::int32_t> animal_head_, animal_next_;
+    std::vector<std::uint16_t> forage_;
+    // Scents, on a grid of nodes four cells across, spreading and fading:
+    // grazing, animals, and animals ready to mate. The last carries what
+    // kind of body it came from, as three sums weighted by its strength.
+    int scent_w_ = 0, scent_h_ = 0;
+    std::vector<std::uint32_t> scent_plant_, scent_animal_, scent_ready_, scent_legs_, scent_water_, scent_wings_, scent_scratch_;
+    std::vector<Call> calls_;
+    void spread_scents();
+    std::uint32_t scent_at(const std::vector<std::uint32_t>& field, int x, int y) const;
+    std::uint32_t next_animal_id_ = 1;
     std::uint32_t next_plant_id_ = 1;
 };
 

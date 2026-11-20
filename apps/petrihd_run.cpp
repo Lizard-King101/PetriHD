@@ -90,6 +90,21 @@ void census(const phd::World& world, double tick_us, bool biomes) {
                 small + trees, trees, snags, trees ? double(tree_height) / double(trees) / 10.0 : 0.0,
                 land ? 100.0 * double(forest) / double(land) : 0.0, burning, burnt, mean(0, 0), mean(1, 0), mean(2, 0),
                 mean(0, 1), mean(1, 1), mean(2, 1), mean(0, 2), mean(1, 2), mean(2, 2));
+    if (!world.animals().empty()) {
+        // Animals, by what their organs make them: walkers, fliers and those
+        // that breathe water; how many are still growing, and how well fed.
+        std::size_t walkers = 0, fliers = 0, swimmers = 0, young = 0;
+        double fed = 0;
+        for (const phd::Animal& a : world.animals()) {
+            const phd::Frame f = phd::frame(a.genome, a.growth);
+            (f.wing ? fliers : !f.breathes_air ? swimmers : walkers) += 1;
+            young += a.growth < 255;
+            fed += double(a.energy) / double(f.store);
+        }
+        std::printf("  animals=%zu walkers=%zu fliers=%zu swimmers=%zu young=%zu fed_pct=%.0f brains=%s\n", world.animals().size(), walkers,
+                    fliers, swimmers, young, 100.0 * fed / double(world.animals().size()),
+                    world.brain_mode() == phd::BrainMode::evolving ? "evolving" : world.brain_mode() == phd::BrainMode::frozen ? "frozen" : "shuffled");
+    }
     if (biomes) {
         for (int b = 0; b < phd::biome_count; ++b) {
             std::printf("  %-17s %6.2f%%\n", phd::biome_name(phd::Biome(b)), 100.0 * double(counts[b]) / double(n));
@@ -103,6 +118,8 @@ int main(int argc, char** argv) {
     phd::WorldConfig config;
     std::uint64_t ticks = 3840, every = 480;
     bool biomes = false;
+    int animals = 0;
+    phd::BrainMode brains = phd::BrainMode::evolving;
     std::string load, save, png;
     for (int i = 1; i < argc; ++i) {
         const char* eq = std::strchr(argv[i], '=');
@@ -125,6 +142,17 @@ int main(int argc, char** argv) {
             config.seasons = std::atoi(value.c_str());
         } else if (key == "biomes") {
             biomes = value != "0";
+        } else if (key == "animals") {
+            animals = std::atoi(value.c_str());
+        } else if (key == "layout") {
+            config.layout = value == "development" ? phd::Layout::development : phd::Layout::valley;
+            if (config.layout == phd::Layout::development) {
+                config.width = 128;
+                config.height = 96;
+            }
+        } else if (key == "brains") {
+            // The controls: frozen passes brains on unchanged; shuffled scrambles each at birth.
+            brains = value == "frozen" ? phd::BrainMode::frozen : value == "shuffled" ? phd::BrainMode::shuffled : phd::BrainMode::evolving;
         } else if (key == "load") {
             load = value;
         } else if (key == "save") {
@@ -144,6 +172,12 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "could not load %s\n", load.c_str());
             return 1;
         }
+    }
+    if (animals > 0 && world.animals().empty()) {
+        world.seed_animals(animals);
+    }
+    if (animals > 0) {
+        world.set_brain_mode(brains);
     }
     const auto end = world.tick() + ticks;
     auto started = std::chrono::steady_clock::now();

@@ -29,7 +29,6 @@ void sample(const phd::World& world, int tx0, int ty0, int w, int h, int per_cel
 
 // A number that changes when the picture of these cells would: water, what
 // grows, snow, fire, the season. Compare it to know when to paint again.
-// With `water` false, how deep the water is doesn't count: only where it is.
-std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h, bool water = true);
+std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h);
 
 } // namespace art::ground

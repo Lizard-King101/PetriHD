@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "camera.hpp"
+#include "pixel_target.hpp"
 
 namespace {
 
@@ -37,6 +38,22 @@ void follow(gfx::Camera& c) {
 
 int main() {
     const float w = 800, h = 448;
+    // Panning by one world-target pixel carries both the sprite and the
+    // shadow grid exactly that far, including fractional zoom and half ties.
+    for (const float zoom : {40.0f, 147.0f, 160.0f, 256.0f}) {
+        const float px = zoom / 2, texel = std::max(1.0f, px / 32.0f);
+        const double world_px = double(384.1f) * px;
+        for (const int width : {287, 288}) {
+            const auto start = gfx::TexelGridAxis::place(world_px, 380.0 * px, width, texel);
+            for (int step = -16; step <= 16; ++step) {
+                const float camera_x = 380.0f + float(step) / px;
+                const auto grid = gfx::TexelGridAxis::place(world_px, double(camera_x) * px, width, texel);
+                CHECK_NEAR(grid.display, start.display - step, 0);
+                CHECK_NEAR(grid.shift, start.shift, 1e-6);
+                CHECK_NEAR((grid.origin + grid.shift) * texel, grid.display, 1e-4);
+            }
+        }
+    }
     for (const float zoom : {2.0f, 32.0f, 64.0f, 128.0f, 256.0f}) {
         gfx::Camera c;
         c.cx = 150;

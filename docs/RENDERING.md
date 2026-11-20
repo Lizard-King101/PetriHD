@@ -43,12 +43,10 @@ The camera (`gfx/camera.hpp`) is orthographic throughout. Pitch follows
 log2(zoom) between those keys, and zooming keeps the ground under the cursor
 in place. Tilting turns about the ground at the focus, not about sea level.
 
-- **Heightfield:** one vertex per cell corner, at the average surface of the
-  four cells around it, using the water's surface wherever there is water.
-  That is the same rule the bake uses for shorelines, so lakes and the sea
-  are flat at their own level, rivers sit in their beds, and nothing floats
-  or z-fights. One vertex buffer per chunk (at most 1,089 vertices, inside
-  ES 2's 16-bit index limit), refreshed in turn as water levels move.
+- The heightfield has one vertex per cell corner and one vertex buffer per
+  chunk. The standard view averages the displayed
+  heights of the four adjacent cells. The shoreline study and dev map draw
+  the bed and the water as separate meshes.
 - **Lighting:** the flat bake hill-shades from the sun. Tilted, the bake skips
   that and the shader lights the mesh from its own normals, with the same
   formula and slope scale (`art::shade_metres`), so the change at 32 px per
@@ -151,8 +149,9 @@ the three-quarter camera, at 32 texels per cell: one texel per art pixel at
   frames.
 - **Drawing:** one upright quad per sprite, hung from a spot in the world.
   The vertex shader snaps that spot to a whole pixel and offsets the corners
-  in texels, so sprites sit on the pixel grid. A sprite takes the depth of
-  its spot; the fragment shader discards clear texels.
+  in texels, so sprites sit on the pixel grid. Grass, reeds and waterweed
+  gain depth from root to tip. Crowns and other rigid pieces use their
+  anchor depth. Clear texels leave the scene behind them visible.
 - **Trees follow the tilt.** A tree is a trunk plus a crown hung at the
   crown's height, or a stack of boughs up the trunk. The camera's pitch moves
   the pieces: looking down, the crown sits over the tree's spot and the
@@ -176,30 +175,57 @@ the three-quarter camera, at 32 texels per cell: one texel per art pixel at
 
 ## Water (shoreline study)
 
-With `--shoreline-study` the water is a surface of its own, not part of the
-ground.
+With `--shoreline-study` or `--dev-map`, the tilted view draws water over
+the lakebed. The overhead map uses the same shoreline at four texels per cell.
 
 ![A lake shore at 128 px per cell, a river in forest, a frozen stream and the open sea](images/water_surface.png)
 
-- **The ground's mesh is the bed.** It no longer rises and falls with the
-  water, so neither does anything standing on it. A corner that touches
-  water is no higher than that water's bed, so a stream one cell wide
-  between high banks still has a channel. The ground painter leaves the
-  water out and paints the bed under it (`art::ground::paint`, `water`
-  false); it is not repainted as the water's depth changes.
-- **The water's mesh** is one quad for each wet cell and each cell around
-  one, at the water's level, rebuilt for a chunk when its water moves. Each
-  corner carries how deep the water is there: the surface less the bed.
-  Corners that touch no water are held just under the ground, so water
-  standing on a slope doesn't spill downhill.
-- **The shader** (`water_fragment_source`) finds the shore where that depth
-  reaches nothing, moved by a noise on the ground's own texels and lapping
-  in and out with time. The bed shows through the first metre in six steps
-  of opacity; deeper water is opaque and darkens with depth. There is a
-  broken pale line at the water's edge, glints that drift across, and ice
-  where it is frozen.
-- **It is drawn last, without writing depth:** over the bed, the shadows on
-  it and the legs of whatever wades, and behind everything standing clear.
+- **Lake and sea levels.** A lake sits at its basin's simulated water
+  level all the way to the bank. The ocean sits at sea level. Rivers follow
+  their channel elevations and meet the standing water at their mouths.
+- **One surface.** A stream's depth follows its flow, but only as far as
+  the land holds it: in a channel it fills up, and on open ground it
+  spreads into a sheet a few decimetres deep rather than standing above
+  its banks. It eases down to the water it runs into over the last few
+  cells. A full pool in a channel passes the flow on and stands level with
+  the stream below it, so a reach, its pools and its mouth are one surface.
+- **Floodwater.** Overlapping river channels each contribute their flow.
+  Water enters enclosed low ground through submerged banks, up to the
+  lowest water level around the pocket. A pond can rise above its usual
+  outlet when a swollen river backs up against it or runs through it.
+- **The bed holds still.** The ground under water is the same ground when
+  the water has gone: its shape comes from the terrain alone, so a flood
+  rises and falls over land that does not move. Both the overhead painter
+  and the tilted renderer take it from `art::water::Field` and draw water
+  where the surface is above it.
+- **Channels.** A stream one cell wide would be dammed at every corner
+  between its banks, so the bed is cut along every cell a stream can run
+  in (`Terrain::channel`: at least 16 cells drain through it), whether or
+  not one is running.
+- **Cell centres.** Every cell has a vertex at its own height in its
+  middle, joined to its four corners, so a hollow or a hummock one cell
+  wide is in the ground and the water finds it. Wading feet and cast
+  shadows follow the same bed as the visible water.
+- **Banks.** Where the simulation leaves ground dry that lies below the
+  water beside it, the surface comes down to meet the land at the far side
+  of that cell. Nothing in the water moves the ground.
+- **The shore.** The water's edge is ragged: the thinnest water is drawn
+  only in the low places of a noise several cells across, so the shore
+  wanders on nearly level ground and the mesh does not show in it. Above
+  it the bank is mud, reaching up unevenly on the side the water is.
+  Sodden soil lies bare as mud in patches further off, more of them toward
+  water; they stay after a flood has gone, until the soil dries.
+  The overhead map's painted water has the same ragged edge.
+- **Bends.** Where a channel turns, or runs corner to corner, the bank
+  cell in the crook of the turn has the bed cut at three of its corners.
+  Its middle is worn down to them, so a stream rounds its bends instead of
+  stepping along the cells. A plant on such a cell stands in the shallows.
+- **Surface details.** Noise and animation vary the colour within the wet
+  area. The shallows show the bed and its shadows, with a broken pale line
+  at the edge. Deep water is opaque and frozen water shows ice.
+- **Water blends over the bed and its shadows.** It reads the scene depth
+  so plants and animals above the surface stay visible. Wading animals and
+  swimmers near the surface are drawn afterward.
 - **Plants in water** stand at its surface and show what is clear of it:
   grass, reeds and bushes are painted that much shorter, and a tree's trunk
   starts at the waterline.
@@ -226,11 +252,11 @@ are painted sprites.
 - **Cloud shadows and fog** are the same two weather textures, laid on the
   ground as level with the focus, so they keep their place as the camera
   tilts. Close up the fog is a veil at six tenths of its strength.
-- **Rain and snow fall across the screen.** Each of up to 280 drops has its
-  own column and falls again and again; it shows while the ground under it
-  is being rained on, more of them the harder it rains, and is a flake where
-  that ground is below freezing. Rain leans with the wind and leaves short
-  pale dashes where it lands.
+- **Rain and snow fall across the screen.** Each streak, flake and splash
+  samples the same interpolated rain field as the soil at its position on
+  the ground. More drops appear where the rain is heavier. Rain leans with
+  the wind and leaves short pale dashes where it lands. Below freezing,
+  flakes drift down.
 - **Lightning** flashes the view and draws its bolt from the top of the
   screen to where it struck.
 - **Fire** is tongues of flame over each burning cell and in the crown of a
@@ -254,6 +280,77 @@ are painted sprites.
   nothing is drawn.
 
 ![Firelight at midnight at 64 px per cell, and before dawn at 128](images/firelight.png)
+
+## Animals (the painted study and the development map)
+
+Animals are procedural bodies, drawn so they read as pixel art
+(`gfx/creature.cpp`, and the animal shader in `gfx/tilt_view.cpp`). The
+study places a grazer and a crawler on the pad and a flier overhead.
+In the lake, three fish measuring 30, 38 and 48 cm swim ahead of the
+original 2.1 m spotted swimmer. Each has its own procedural body, pose
+and tail beat. A six-legged crawler paddles a smaller loop nearby.
+To watch them on the development map, run
+`build/petrihd --dev-map --seed 6 --at 98,56.8 --zoom 144 --phase 4.71`.
+The study sets their sizes and paths, for a world with no animals of its
+own. Where the world has animals (the development map starts with 48; any
+world with `--animals N`), those are drawn instead: each body is what its
+genome's organs add up to (`body_of` in `gfx/tilt_view.cpp`), posed from
+where the simulation has it, which way it faces, how far it has travelled
+and what it is moving through. Between ticks each is eased toward its new
+place, so it moves smoothly at any frame rate. See [ANIMALS.md](ANIMALS.md).
+
+![The grazer and the crawler at 256 px per cell, the crawler under the flier, and the swimmer at 128](images/animals.png)
+
+- **A body is built each frame** from what its organs add up to
+  (`creature::Body`: trunk, neck, head, tail, pairs of legs and how far they
+  sprawl, fins, wings, pigments and a pattern) and how it is moving
+  (`creature::Pose`). The spine is a tube of eight-sided rings from the tail
+  to the snout, which wags as it goes, a swimmer's with its whole length.
+- **Legs follow the medium.** On land, neighbouring legs take turns. A
+  planted foot stays on the ground while the body passes over, then lifts
+  and swings ahead. In water, each foot sweeps back wide and recovers close
+  to the flank. In flight, the knees fold forward and the toes point aft
+  under the belly. All three poses use the body's leg count and proportions.
+- **Fins and wings** are flat pieces lit the same from both sides. The
+  shoulder drives the wingbeat. The wrist folds the outer span down on
+  the upstroke and extends it with a slight upward bend on the downstroke.
+- **Stepped light.** Light from the upper left gives the coat four broad
+  tones, from cool shade to warm highlights. Narrow transitions between
+  tones keep a turning flank steady. Stripes and spots follow the skin.
+  Smaller mip levels average their coverage when a marking becomes narrower
+  than a pixel.
+- **A leg leaves the body from inside it:** the hip is under the body for
+  legs that stand beneath it and at its flank for legs that sprawl, the top
+  of the leg is a shoulder or haunch as thick as half the body, and it has
+  the body's own colour there, darkening down the leg. Joints fold along
+  the body, forward at the front and back at the rear; sprawled, up and out.
+- **Ink.** The ink is a deep shade of the animal's own colour, darker and
+  bluer than its darkest tone, not black. Before the body it is drawn four
+  times in ink, a pixel to each side and about the body's girth further away. That leaves a one-pixel
+  outline round the animal and round a limb where it stands clear of the
+  body, but none where the limb leaves the body.
+- **The creature pixel grid.** Each animal draws into its own tile at
+  the world's texel size. At 256 px per cell and the default display scale,
+  one coat texel spans four pixels of the world render target. The grid
+  stays anchored to the body as it turns and steps. The finished tile and
+  its shadows move together in single target pixels when the animal or
+  camera moves. Each occupied texel stores the visible surface's depth
+  in its alpha channel. A stem between two legs can cover the far shin
+  while the near shin covers the stem. On core GLES2 without fragment
+  depth output, the same layer is composited in depth slices. Each visible
+  eye sits on a socket on the head and covers at least one whole layer pixel.
+  The head and other body parts can hide it as the animal turns. Shins
+  also have a minimum width on this grid.
+- **In water.** The water hides whatever its bed is too deep to show, so an
+  animal swimming within half a cell of the surface is laid in after the
+  water, tinted by it and without ink. One that wades is laid over the
+  water whole: its legs are not tinted.
+- **Pixel shadows.** Every animal casts its posed mesh along the sun's
+  direction onto the terrain. Heads, tails and moving limbs all contribute
+  to one silhouette on the creature pixel grid. On land each sole adds
+  a darker contact mark at touchdown, fading in steps as the foot lifts.
+  In water the tail and paddling legs sweep across the lakebed, with
+  ripples and glints above the shadow.
 
 ## One pixel grid
 
@@ -285,7 +382,7 @@ concept art. The interface stays at full resolution on top.
 | O | Move the test tree and creature to the focus |
 | `--zoom Z --at X,Y` | Start at a zoom and focus cell |
 | `--relief K` | Display cells of height per metre |
-| `--pixel N` | Screen pixels per art pixel (default 2; 1 turns the grid off) |
+| `--pixel N` | Screen pixels per world-target pixel (default 2). Use 1 for screen-pixel positioning at full resolution. |
 
 ## Results on the PC
 

@@ -183,6 +183,30 @@ void World::seed_plants() {
                 shrubs = m < 60 ? 30 : 10;
                 slots = m < 60 ? 1 : 3;
             }
+            if (config_.layout == Layout::development && ground != Substrate::rock) {
+                // Planted by hand: a mixed wood, a meadow of grass and herbs
+                // with no trees, and a pad of short turf.
+                switch (development_zone(x, y, w, h)) {
+                case Zone::wood:
+                    tree = roll % 3 == 0 ? founder_conifer : founder_broadleaf;
+                    tree_chance = 60;
+                    shrubs = 14;
+                    break;
+                case Zone::meadow:
+                    tree_chance = 0;
+                    shrubs = 2;
+                    break;
+                case Zone::pad:
+                    tree_chance = 0;
+                    shrubs = 0;
+                    slots = 2;
+                    break;
+                case Zone::open:
+                    tree_chance = std::min(tree_chance, 3); // a few, scattered
+                    shrubs = std::min(shrubs, 4);
+                    break;
+                }
+            }
             if (tree && roll < tree_chance && room_for_tree(cell)) {
                 put(tree, cell, whole_cell);
                 continue;

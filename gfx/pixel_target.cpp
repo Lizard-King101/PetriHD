@@ -5,9 +5,9 @@
 
 namespace gfx {
 
-bool PixelTarget::init(int width, int height) {
-    gl::GenFramebuffers(1, &framebuffer_);
-    gl::GenRenderbuffers(1, &depth_);
+bool PixelTarget::init(int width, int height, int min_alpha_bits) {
+    if (!framebuffer_) gl::GenFramebuffers(1, &framebuffer_);
+    if (!depth_) gl::GenRenderbuffers(1, &depth_);
     const auto* extensions = reinterpret_cast<const char*>(gl::GetString(gl::EXTENSIONS));
     const bool deep = !gl::is_es() || (extensions && std::strstr(extensions, "GL_OES_depth24"));
     gl::BindRenderbuffer(gl::RENDERBUFFER, depth_);
@@ -17,16 +17,30 @@ bool PixelTarget::init(int width, int height) {
     gl::FramebufferRenderbuffer(gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, depth_);
     bool ok = false;
     for (const gl::GLenum format : {gl::RGBA, gl::RGB}) {
-        texture_ = make_texture(width, height, format, nullptr);
+        if (texture_.id) {
+            gl::BindTexture(gl::TEXTURE_2D, texture_.id);
+            gl::TexImage2D(gl::TEXTURE_2D, 0, format, width, height, 0, format, gl::UNSIGNED_BYTE, nullptr);
+            texture_.width = width;
+            texture_.height = height;
+        } else {
+            texture_ = make_texture(width, height, format, nullptr);
+        }
         gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, texture_.id, 0);
         ok = gl::CheckFramebufferStatus(gl::FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
-        has_alpha_ = ok && format == gl::RGBA;
-        if (ok) {
-            break;
+        if (ok) gl::GetIntegerv(gl::ALPHA_BITS, &alpha_bits_);
+        if (format == gl::RGBA && min_alpha_bits && (!ok || alpha_bits_ < min_alpha_bits)) {
+            // RGBA4 is color-renderable in core GLES2. A one-bit alpha
+            // attachment cannot distinguish the surfaces in the animal layer.
+            gl::TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA, width, height, 0, gl::RGBA, gl::UNSIGNED_SHORT_4_4_4_4, nullptr);
+            ok = gl::CheckFramebufferStatus(gl::FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
+            if (ok) gl::GetIntegerv(gl::ALPHA_BITS, &alpha_bits_);
         }
+        if (ok && alpha_bits_ >= min_alpha_bits) break;
+        ok = false;
     }
     gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
     if (!ok) {
+        alpha_bits_ = 0;
         std::fprintf(stderr, "the pixel target's framebuffer is incomplete\n");
     }
     return ok;
@@ -40,7 +54,7 @@ void PixelTarget::begin() {
 }
 
 void PixelTarget::end(int drawable_w, int drawable_h) {
-    if (has_alpha_) {
+    if (has_alpha()) {
         // Whatever was blended in, the finished image is opaque.
         gl::ColorMask(0, 0, 0, 1);
         gl::ClearColor(0, 0, 0, 1);

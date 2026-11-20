@@ -7,7 +7,7 @@ The design is in [docs/PLAN.md](docs/PLAN.md).
 **Status:** milestone 2, plants. A generated valley running down to the
 sea, with hills, streams, ponds, seasons, weather and fire, and 100,000+
 plants, each with its own genome, that grow, compete, seed, evolve, burn
-and come back. No animals yet. See [docs/PLANTS.md](docs/PLANTS.md).
+and come back. Animals have bodies and graze but no brains yet: see [docs/ANIMALS.md](docs/ANIMALS.md). See [docs/PLANTS.md](docs/PLANTS.md).
 
 ## Build
 
@@ -21,7 +21,8 @@ ctest --test-dir build
 
 - `build/petrihd`: the window. Drag to pan, scroll or pinch to zoom,
   long-press or right-click a cell to inspect it. Space pauses, 1–4 set the
-  speed, H toggles the budget HUD, S saves, F12 takes a screenshot.
+  speed, H shows the current simulation tick and performance HUD, S saves,
+  and F12 takes a screenshot named for the tick.
   `--seed N`, `--size 1024x600`, `--load FILE`, `--ticks N` (run ahead
   first), `--shot FILE.png` (draw one frame and quit), `--frames N --speed
   0-3` (time N frames and quit).
@@ -56,6 +57,43 @@ Add `--shot shoreline.png` to capture the reference frame and exit. The
 capture hides the budget HUD and uses a fixed animation phase.
 
 ![Shoreline study with layered crowns, reeds and a creature at the water’s edge](docs/images/shoreline_study.png)
+
+## Development map
+
+Run `build/petrihd --dev-map` for a small world (128 x 96 cells, 192 x 144 m)
+laid out by hand, drawn the painted way, for trying things in every kind of
+place at once. It is a real world: the same simulation runs on it.
+
+![The development map from above](docs/images/dev_map.png)
+
+| Where | What is there |
+| --- | --- |
+| North-west | A 24 m hill, gentle to the south and west and steep on its east face |
+| North-east | A ramp: one even slope, 11 m up to the north edge |
+| Middle | A meadow, and south of the stream a pad of short turf on one even plane |
+| West | A mixed wood |
+| East | A lake about 3.5 m deep with a wide shallow shelf on its west side |
+| Across the middle | A stream from the hill's foot into the lake, and the lake's outlet south to the sea |
+| South | A beach and the sea |
+
+It opens on the pad at 64 px per cell, playing. `--at X,Y`, `--zoom` and
+`--ticks` work as elsewhere. The layout is `phd::Layout::development`
+(`core/terrain.cpp`), kept in saves from version 6.
+
+During a flood, press Space to pause and H to see the tick. Right-click or
+long-press a cell to read its coordinates, ground elevation and water depth.
+Older saves recalculate flood coverage when opened, at the saved tick.
+
+One storm crosses the dev map every two simulation days. This opens the
+meadow just before the first one arrives.
+
+```sh
+build/petrihd --dev-map --seed 1 --at 63.2,35.7 --zoom 53 --ticks 210
+```
+
+Rain reaches this spot around tick 241. Watch the water spread through the
+grass, then pull back after the rain ends around tick 400. Press 3 for 4×
+speed or 2 to return to normal.
 
 ## Layout
 

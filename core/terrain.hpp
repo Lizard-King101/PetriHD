@@ -22,6 +22,18 @@ struct Basin {
     std::int32_t cell;    // one of its cells
 };
 
+// The lie of the land. A valley is made from the seed. The development map
+// is laid out by hand for trying things in every kind of place at once: a
+// hill with a steep east face in the north-west, an even ramp in the
+// north-east, a meadow in the middle with a pad that is one even plane, a wood in
+// the west, a lake in the east with a wide shallow shelf, a stream into it
+// and out to the sea, and a beach and the sea along the south.
+enum class Layout : std::uint32_t { valley, development };
+
+// The parts of the development map, for what is planted where.
+enum class Zone : std::uint8_t { open, wood, meadow, pad };
+Zone development_zone(int x, int y, int width, int height);
+
 // Everything fixed at world creation, regenerated from the seed on load.
 struct Terrain {
     int width = 0, height = 0;
@@ -32,6 +44,7 @@ struct Terrain {
     std::vector<std::int32_t> order;      // downstream cells first
     std::vector<std::uint16_t> basin;     // 1-based index into basins, 0 for none
     std::vector<Basin> basins;            // [0] unused
+    std::vector<std::uint8_t> channel;    // 1 where enough land drains through for a stream to run
     std::vector<std::uint8_t> ocean;      // 1 where the sea is
     std::vector<std::uint8_t> coast;      // 1 for land or shallows within 2 cells of the sea
     std::vector<std::uint8_t> sea_distance; // cells to the sea, capped at 255
@@ -41,7 +54,7 @@ struct Terrain {
     std::vector<std::uint8_t> slope;      // dm per cell, the steepest fall
 
     // ocean_percent of the cells end up below sea level.
-    void generate(std::uint32_t seed, int width, int height, int ocean_percent);
+    void generate(std::uint32_t seed, int width, int height, int ocean_percent, Layout layout = Layout::valley);
 
 private:
     void flood();

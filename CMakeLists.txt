@@ -16,11 +16,11 @@ endif()
 option(PETRIHD_GUI "Build the windowed app (needs SDL2)" ON)
 
 # The simulation: deterministic, no dependencies.
-add_library(petrihd_core core/world.cpp core/terrain.cpp core/plants.cpp core/file.cpp core/png.cpp)
+add_library(petrihd_core core/world.cpp core/terrain.cpp core/plants.cpp core/animals.cpp core/brain.cpp core/file.cpp core/png.cpp)
 target_include_directories(petrihd_core PUBLIC core)
 
 # Terrain art: no GL, so headless screenshots match the window.
-add_library(petrihd_art gfx/terrain_art.cpp gfx/plant_sprites.cpp gfx/ground_art.cpp)
+add_library(petrihd_art gfx/terrain_art.cpp gfx/plant_sprites.cpp gfx/ground_art.cpp gfx/water_surface.cpp)
 target_include_directories(petrihd_art PUBLIC gfx)
 target_link_libraries(petrihd_art PUBLIC petrihd_core)
 
@@ -40,10 +40,16 @@ add_test(NAME core COMMAND petrihd_core_tests)
 add_executable(petrihd_camera_tests tests/camera_test.cpp)
 target_include_directories(petrihd_camera_tests PRIVATE gfx)
 add_test(NAME camera COMMAND petrihd_camera_tests)
+add_executable(petrihd_creature_tests tests/creature_test.cpp gfx/creature.cpp)
+target_include_directories(petrihd_creature_tests PRIVATE gfx)
+add_test(NAME creature COMMAND petrihd_creature_tests)
+add_executable(petrihd_water_tests tests/water_test.cpp)
+target_link_libraries(petrihd_water_tests PRIVATE petrihd_art)
+add_test(NAME water COMMAND petrihd_water_tests)
 
 if(PETRIHD_GUI)
     find_package(SDL2 REQUIRED)
-    add_library(petrihd_gfx gfx/gl.cpp gfx/batch.cpp gfx/font.cpp gfx/world_view.cpp gfx/tilt_view.cpp gfx/pixel_target.cpp)
+    add_library(petrihd_gfx gfx/gl.cpp gfx/batch.cpp gfx/font.cpp gfx/world_view.cpp gfx/tilt_view.cpp gfx/pixel_target.cpp gfx/creature.cpp)
     target_include_directories(petrihd_gfx PUBLIC gfx ui)
     target_link_libraries(petrihd_gfx PUBLIC SDL2::SDL2 petrihd_art)
 

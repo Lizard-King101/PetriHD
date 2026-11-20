@@ -87,12 +87,97 @@ void Terrain::flood() {
     }
 }
 
-void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent) {
+Zone development_zone(int x, int y, int width, int height) {
+    const int u = x * 100 / std::max(1, width - 1), v = y * 100 / std::max(1, height - 1);
+    if (u >= 42 && u <= 56 && v >= 58 && v <= 76) {
+        return Zone::pad; // south of the stream, clear of its floods
+    }
+    if (u < 40 && v >= 42 && v <= 78) {
+        return Zone::wood;
+    }
+    if (u >= 40 && u <= 62 && v >= 32 && v <= 78) {
+        return Zone::meadow;
+    }
+    return Zone::open;
+}
+
+namespace {
+
+// The development map's ground, in dm above the sea. In whole numbers, as
+// all the world is, so it comes out the same on every machine. Places are
+// in hundredths of a cell and shares in 1024ths.
+int development_height(int x, int y, int w, int h, std::uint32_t seed) {
+    const auto smooth = [](std::int64_t t) {
+        t = std::clamp<std::int64_t>(t, 0, 1024);
+        return int(t * t * (3 * 1024 - 2 * t) / (1024 * 1024));
+    };
+    const auto length = [](std::int64_t dx, std::int64_t dy) { return std::int64_t(isqrt(std::uint64_t(dx * dx + dy * dy))); };
+    const int px = x * 100, py = y * 100;
+    const int u = x * 1000 / (w - 1), v = y * 1000 / (h - 1); // thousandths across and down
+    int dm = 60; // the meadow, 6 m above the sea
+    // The hill: 24 m, gentle to the south and west, steep on its east face.
+    {
+        std::int64_t dx = px - 18 * w;
+        const std::int64_t dy = py - 16 * h;
+        dx = dx > 0 ? dx * 21 / 10 : dx;
+        dm += 240 * smooth(1024 - length(dx, dy) * 1024 / (33 * w)) / 1024;
+    }
+    // The ramp: one even slope, 11 m up to the north edge.
+    dm += 110 * std::clamp((340 - v) * 1024 / 340, 0, 1024) / 1024 * smooth((u - 550) * 1024 / 80) / 1024;
+    // The lake: a bowl 4.8 m deep, with a wide shelf on its west side.
+    {
+        const std::int64_t dx = std::int64_t(px - 77 * w) * 1024 / 1700, dy = std::int64_t(py - 56 * h) * 1024 / 1300;
+        const std::int64_t d2 = (dx * dx + dy * dy) / 1024;
+        if (d2 < 1024) {
+            const bool shelf = dx < -256;
+            dm -= int((shelf ? 9 : 48) * (1024 - d2) / 1024) + (shelf ? 0 : 4);
+        }
+    }
+    // Channels 1.8 m deep and 2 cells to either side: the stream from the
+    // hill's foot to the lake, and the lake's way out to the sea. Ends are in
+    // hundredths of the map's width and height. The land rises gently away
+    // from them, 3.5 cm a cell, so rain runs to them and not across the flat.
+    std::int64_t nearest = 4000;
+    const auto channel = [&](int ax, int ay, int bx, int by) {
+        ax *= w, bx *= w, ay *= h, by *= h;
+        const std::int64_t lx = bx - ax, ly = by - ay, qx = px - ax, qy = py - ay;
+        const std::int64_t t = std::clamp<std::int64_t>((qx * lx + qy * ly) * 1024 / (lx * lx + ly * ly), 0, 1024);
+        nearest = std::min(nearest, length(qx - lx * t / 1024, qy - ly * t / 1024));
+    };
+    channel(30, 30, 50, 44);
+    channel(50, 44, 74, 56); // on into the deep of the lake, so the stream has somewhere to go
+    channel(77, 68, 77, 84);
+    dm += int(nearest * 35 / 10000) - int(18 * std::max<std::int64_t>(0, 200 - nearest) / 200);
+    // The beach and the sea: shelving gently, then away.
+    if (v > 780) {
+        const int t = (v - 780) * 1024 / 220;
+        dm -= 70 * t / 1024 + 60 * t / 1024 * t / 1024;
+    }
+    // A little unevenness everywhere but the pad, which is one even plane.
+    if (development_zone(x, y, w, h) != Zone::pad) {
+        dm += (value_noise(x, y, 9, stream_seed(seed, 0x6465u)) - 32768) * 2 / 32768;
+    }
+    return dm;
+}
+
+} // namespace
+
+void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent, Layout layout) {
     width = w;
     height = h;
     const std::size_t n = std::size_t(w) * h;
     const auto salt = [seed](std::uint32_t purpose) { return stream_seed(seed, purpose); };
     coast_side = int(salt(salt_side) % 4);
+    if (layout == Layout::development) {
+        coast_side = 0;
+        elevation.resize(n);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                elevation[std::size_t(y) * w + x] = static_cast<std::int16_t>(std::clamp(development_height(x, y, w, h, seed), -2000, 3000));
+            }
+        }
+        flood();
+    } else {
 
     // A valley: land rising away from the sea, rolling hills, rocky ridges
     // and outcrops, and walls on the three landward edges.
@@ -168,6 +253,7 @@ void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent) {
         last_sea = sea;
         sea += 8;
     }
+    } // a valley
 
     // Land below sea level that the sea can't reach would be a dry pit; in
     // a valley it is a wet hollow just above the water table.
@@ -177,6 +263,7 @@ void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent) {
         }
     }
     flood();
+    // (The development map's channels are cut by hand, and stay as cut.)
     std::vector<int> carry(n, 1), carve(n, 0);
     for (auto at = order.rbegin(); at != order.rend(); ++at) {
         const int down = downstream[std::size_t(*at)];
@@ -185,7 +272,7 @@ void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent) {
         }
     }
     for (std::size_t i = 0; i < n; ++i) {
-        if (elevation[i] > 0 && carry[i] > 120) {
+        if (layout == Layout::valley && elevation[i] > 0 && carry[i] > 120) {
             int bits = 0;
             for (int f = carry[i] / 120; f > 1; f >>= 1) {
                 ++bits;
@@ -336,6 +423,21 @@ void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent) {
                 s = Substrate::clay;
             }
             substrate[i] = std::uint8_t(s);
+        }
+    }
+    // Where a stream can run: a cell that at least this many drain through.
+    // A stream comes and goes with the weather, and its bed has to be there
+    // either way. (No stream has been seen with fewer than 19.)
+    std::vector<int> drains(n, 1);
+    channel.assign(n, 0);
+    for (auto at = order.rbegin(); at != order.rend(); ++at) {
+        const auto i = std::size_t(*at);
+        if (ocean[i]) {
+            continue;
+        }
+        channel[i] = drains[i] >= 16 && !basin[i];
+        if (const int down = downstream[i]; down >= 0) {
+            drains[std::size_t(down)] += drains[i];
         }
     }
 }

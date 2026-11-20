@@ -41,9 +41,11 @@ const char* shader_preamble() {
 
 namespace {
 
-GLuint compile(GLenum type, const char* source) {
+GLuint compile(GLenum type, const char* source, const char* directives = "") {
     const GLuint shader = CreateShader(type);
-    const std::string full = std::string(shader_preamble()) + source;
+    std::string full = shader_preamble();
+    full.insert(full.find('\n') + 1, directives); // extensions must precede precision declarations
+    full += source;
     const char* text = full.c_str();
     ShaderSource(shader, 1, &text, nullptr);
     CompileShader(shader);
@@ -60,8 +62,8 @@ GLuint compile(GLenum type, const char* source) {
 
 } // namespace
 
-GLuint program(const char* vertex, const char* fragment, const char* const* attributes, int count) {
-    const GLuint vs = compile(VERTEX_SHADER, vertex), fs = compile(FRAGMENT_SHADER, fragment);
+GLuint program(const char* vertex, const char* fragment, const char* const* attributes, int count, const char* fragment_directives) {
+    const GLuint vs = compile(VERTEX_SHADER, vertex), fs = compile(FRAGMENT_SHADER, fragment, fragment_directives);
     if (!vs || !fs) {
         return 0;
     }

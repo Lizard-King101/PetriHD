@@ -8,6 +8,8 @@
 //           [--flat] [--relief K]      (no tilted view; display cells per metre)
 //           [--pixel N]                (screen pixels per art pixel, default 2)
 //           [--shoreline-study]        (open the spring shoreline art study)
+//           [--dev-map]                (a small hand-laid world, drawn the painted way)
+//           [--phase SECONDS]          (how far into the study's animation a shot is taken)
 //
 // Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
 // T locks the camera top-down, G turns the tilted view off and on, O puts
@@ -171,7 +173,10 @@ int main(int argc, char** argv) {
     int width = 800, height = 480;
     std::string load, shot;
     bool quit_after_shot = false;
-    bool shoreline_study = false;
+    bool shoreline_study = false, dev_map = false;
+    std::uint32_t inspect_id = 0; // an animal to open the inspector on, and follow
+    int animals = -1; // founders to put into a new world; by default, some on the development map
+    double start_phase = 1.0; // seconds into the study's animation: the pose a shot is taken in
     int bench_frames = 0;
     std::optional<int> start_speed;
     std::optional<long long> skip_ticks;
@@ -189,8 +194,19 @@ int main(int argc, char** argv) {
             load = argv[++i];
         } else if (arg == "--shoreline-study") {
             shoreline_study = true;
+        } else if (arg == "--dev-map") {
+            // A small hand-laid world for trying things in every kind of
+            // place, drawn the painted way.
+            dev_map = shoreline_study = true;
+            config.layout = phd::Layout::development;
+            config.width = 128;
+            config.height = 96;
         } else if (arg == "--zoom" && more) {
             start_zoom = std::clamp(float(std::atof(argv[++i])), 1.0f, 256.0f);
+        } else if (arg == "--inspect" && more) {
+            inspect_id = std::uint32_t(std::atoi(argv[++i]));
+        } else if (arg == "--animals" && more) {
+            animals = std::atoi(argv[++i]);
         } else if (arg == "--at" && more && std::sscanf(argv[++i], "%f,%f", &at_x, &at_y) == 2) {
         } else if (arg == "--pixel" && more) {
             pixel = std::clamp(std::atoi(argv[++i]), 1, 8);
@@ -204,12 +220,14 @@ int main(int argc, char** argv) {
             bench_frames = std::atoi(argv[++i]);
         } else if (arg == "--speed" && more) {
             start_speed = std::clamp(std::atoi(argv[++i]), 0, 3);
+        } else if (arg == "--phase" && more) {
+            start_phase = std::atof(argv[++i]);
         } else if (arg == "--shot" && more) {
             shot = argv[++i];
             quit_after_shot = true;
         } else {
             std::fprintf(stderr, "usage: %s [--seed N] [--size WxH] [--load FILE] [--shot FILE.png] "
-                                 "[--frames N --speed 0-3] [--shoreline-study]\n", argv[0]);
+                                 "[--frames N --speed 0-3] [--shoreline-study] [--dev-map]\n", argv[0]);
             return 2;
         }
     }
@@ -249,6 +267,10 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    // Founders, for a world that has no animals yet.
+    if (world.animals().empty() && (animals > 0 || (animals < 0 && dev_map))) {
+        world.seed_animals(animals > 0 ? animals : 48);
+    }
     const long long initial_ticks = skip_ticks.value_or(shoreline_study && load.empty() ? 120 : 0);
     for (long long t = 0; t < initial_ticks; ++t) {
         world.step();
@@ -276,7 +298,10 @@ int main(int argc, char** argv) {
     }
     Camera camera;
     camera.shoreline_study = shoreline_study;
-    if (shoreline_study && at_x < 0 && at_y < 0) {
+    if (dev_map && at_x < 0 && at_y < 0) {
+        at_x = 62; // the level pad, with the wood to the west and the lake to the east
+        at_y = 64;
+    } else if (shoreline_study && at_x < 0 && at_y < 0) {
         at_x = 186;
         at_y = 73;
     }
@@ -291,12 +316,14 @@ int main(int argc, char** argv) {
         camera.zoom_about(zoom, sx, sy, float(width), float(view_height));
         clamp_camera();
     };
-    tilt.place_test_scene(world, camera.cx, camera.cy);
+    // The test animals start on the development map's pad wherever the view
+    // opens, so a shot of any part of the map finds them in the same places.
+    tilt.place_test_scene(world, dev_map ? 62.0f : camera.cx, dev_map ? 64.0f : camera.cy);
 
-    int speed = start_speed.value_or(shoreline_study ? 0 : 1);
+    int speed = start_speed.value_or(shoreline_study && !dev_map ? 0 : 1);
     long long tilt_frame = 0;
     bool hud = !shoreline_study, running = true;
-    double study_animation = 1.0; // the pose in the reference frame
+    double study_animation = start_phase; // the pose in the reference frame, or the one asked for
     double accumulator = 0, tick_ms = 0, frame_ms = 0, fps = 60, last_frame = now_seconds();
     double last_save = last_frame;
     std::string status;
@@ -312,6 +339,60 @@ int main(int argc, char** argv) {
     // Pointers: one drags, two pinch.
     std::map<SDL_FingerID, ui::Pointer> held;
     int inspected = -1;          // the cell in the inspector, or -1
+    std::uint32_t watched = inspect_id; // the animal in the inspector, or 0
+    bool following = inspect_id != 0;   // whether the view keeps it in the middle
+    const auto find_animal = [&](std::uint32_t id) -> const phd::Animal* {
+        for (const phd::Animal& a : world.animals()) {
+            if (a.id == id) {
+                return &a;
+            }
+        }
+        return nullptr;
+    };
+    // Where an animal is on the screen: its middle, as the close view draws it.
+    const auto animal_on_screen = [&](const phd::Animal& a, float& sx, float& sy) {
+        const float x = float(a.x) / 256.0f, y = float(a.y) / 256.0f;
+        const gfx::creature::Body body = gfx::animal_body(a.genome, a.growth);
+        float z = camera.focus_z;
+        if (tilt_enabled && camera.tilted()) {
+            z = tilt.animal_height(a);
+        }
+        camera.to_screen(x, y, z, float(width), float(view_height), sx, sy);
+        return std::max(14.0f, (body.length + body.wing) * camera.zoom * 0.6f); // how near a tap must land
+    };
+    // Toward the middle of the screen from where it is drawn, which for a
+    // flier or a fish is not over its ground.
+    const auto follow_step = [&](const phd::Animal& a) {
+        float sx, sy;
+        animal_on_screen(a, sx, sy);
+        // The middle of what the inspector's panel leaves clear.
+        camera.cx += (sx - (float(width) - panel_width) / 2) / camera.zoom * 0.15f;
+        camera.cy += (sy - float(view_height) / 2) / (camera.zoom * camera.sin_pitch()) * 0.15f;
+        clamp_camera();
+    };
+    // Asked to inspect one from the start: open with it already in the middle.
+    if (const phd::Animal* a = find_animal(watched)) {
+        camera.cx = float(a->x) / 256.0f;
+        camera.cy = float(a->y) / 256.0f;
+        for (int k = 0; k < 60; ++k) {
+            camera.focus_z = tilt.ground(camera.cx, camera.cy);
+            follow_step(*a);
+        }
+    }
+    const auto animal_at = [&](float px, float py) {
+        std::uint32_t found = 0;
+        float nearest = 1e9f;
+        for (const phd::Animal& a : world.animals()) {
+            float sx, sy;
+            const float reach = animal_on_screen(a, sx, sy);
+            const float d = std::hypot(sx - px, sy - py);
+            if (d < reach && d < nearest) {
+                nearest = d;
+                found = a.id;
+            }
+        }
+        return found;
+    };
     double press_time = 0;       // when the single pointer went down
     float press_x = 0, press_y = 0;
     bool press_moved = false, press_fired = false;
@@ -389,8 +470,10 @@ int main(int argc, char** argv) {
                     }
                     continue;
                 }
-                if (inspected >= 0 && p.x >= float(width) - panel_width) {
+                if ((inspected >= 0 || watched) && p.x >= float(width) - panel_width) {
                     inspected = -1; // tapping the inspector closes it
+                    watched = 0;
+                    following = false;
                     continue;
                 }
                 held[p.id] = p;
@@ -412,6 +495,9 @@ int main(int argc, char** argv) {
                 if (std::hypot(p.x - press_x, p.y - press_y) > 8) {
                     press_moved = true;
                 }
+                if (held.size() == 1 && dragging && press_moved) {
+                    following = false; // dragging the view lets the animal go
+                }
                 if (held.size() == 1 && dragging) {
                     camera.cx -= (p.x - drag_x) / camera.zoom;
                     camera.cy -= (p.y - drag_y) / (camera.zoom * camera.sin_pitch());
@@ -428,7 +514,13 @@ int main(int argc, char** argv) {
                 }
             } else if (p.type == ui::Pointer::up) {
                 if (held.size() == 1 && held.count(p.id) && !press_moved && !press_fired) {
-                    inspected = -1; // a short tap on the world closes the inspector
+                    // A short tap on an animal inspects it and follows it; on the
+                    // one already inspected, lets it go or follows again;
+                    // elsewhere, closes.
+                    inspected = -1;
+                    const std::uint32_t tapped = animal_at(p.x, p.y);
+                    following = tapped && tapped == watched ? !following : tapped != 0;
+                    watched = tapped;
                 }
                 held.erase(p.id);
                 dragging = false;
@@ -444,7 +536,23 @@ int main(int argc, char** argv) {
         if (held.size() == 1 && press_time > 0 && !press_moved && !press_fired &&
             now_seconds() - press_time > long_press_seconds) {
             inspected = cell_at(press_x, press_y);
+            watched = 0;
+            following = false;
             press_fired = true;
+        }
+
+        // The watched animal: gone if it has died; kept in the middle if followed.
+        if (watched) {
+            if (const phd::Animal* a = find_animal(watched)) {
+                if (following) {
+                    follow_step(*a);
+                }
+            } else {
+                status = "IT DIED";
+                status_until = now_seconds() + 3;
+                watched = 0;
+                following = false;
+            }
         }
 
         // Smooth zoom toward the target, about the pointer that asked for it.
@@ -505,6 +613,10 @@ int main(int argc, char** argv) {
         SDL_GL_GetDrawableSize(window, &drawable_w, &drawable_h);
         const Camera art_camera = camera.for_target(float(pixel));
         bool scene_ready = true;
+        if (tilted) {
+            // The animals have a picture of their own, drawn before the frame's.
+            tilt.prepare_animals(world, art_camera, art_w, art_h, art_h, shoreline_study ? study_animation : frame_start);
+        }
         target.begin();
         if (tilted) {
             if (++tilt_frame % 15 == 0 || capture) {
@@ -537,6 +649,34 @@ int main(int argc, char** argv) {
         batch.begin(width, height);
         // The framebuffer's rows run bottom to top.
         batch.quad(target.texture(), 0, 0, float(art_w * pixel), float(art_h * pixel), 0, 1, 1, 0, white);
+        if (!tilted) {
+            // On the map every animal is a dot in its own colour, on the art's
+            // pixel grid: bigger for a bigger body and as the view closes in,
+            // dimmed with the daylight like the land under it. One in the air
+            // is paler, and has no dark rim.
+            const float light = 0.45f + 0.55f * float(world.daylight()) / 255.0f;
+            const float grid = float(pixel);
+            for (const phd::Animal& a : world.animals()) {
+                float sx, sy;
+                animal_on_screen(a, sx, sy);
+                if (sx < -8 || sy < -8 || sx > float(width) + 8 || sy > float(view_height) + 8) {
+                    continue;
+                }
+                const gfx::creature::Body body = gfx::animal_body(a.genome, a.growth);
+                // Never smaller than two art pixels across, so its colour shows.
+                const float half = std::max(2.0f, std::round(body.length * camera.zoom / grid)) * grid * 0.5f;
+                const float x0 = std::floor((sx - half) / grid) * grid, y0 = std::floor((sy - half) / grid) * grid;
+                const float x1 = x0 + std::max(grid, std::round(2 * half / grid) * grid), y1 = y0 + (x1 - x0);
+                const bool flying = phd::Medium(a.medium) == phd::Medium::air;
+                const float k = (flying ? 1.5f : 1.2f) * light;
+                const auto tone = [&](float c, float f) { return std::uint8_t(std::clamp(c * f, 0.0f, 255.0f)); };
+                if (!flying) {
+                    font.rect(batch, x0 - grid, y0 - grid, x1 + grid, y1 + grid,
+                              {tone(body.primary.r, light * 0.3f), tone(body.primary.g, light * 0.3f), tone(body.primary.b, light * 0.34f), 255});
+                }
+                font.rect(batch, x0, y0, x1, y1, {tone(body.primary.r, k), tone(body.primary.g, k), tone(body.primary.b, k), 255});
+            }
+        }
         if (inspected >= 0) {
             // Outline the cell, projected through the camera at its ground height.
             const float x = float(inspected % world.width()), y = float(inspected / world.width());
@@ -551,6 +691,148 @@ int main(int argc, char** argv) {
             font.rect(batch, px[3] - 1, std::max(py[2], py[3]) - 1, px[2] + 1, std::max(py[2], py[3]) + 1, mark);
             font.rect(batch, px[0] - 1, py[0], px[0] + 1, py[3], mark);
             font.rect(batch, px[1] - 1, py[1], px[1] + 1, py[2], mark);
+        }
+
+        // The animal inspector: what it is, how it is doing, and its organs.
+        if (const phd::Animal* a = watched ? find_animal(watched) : nullptr) {
+            const phd::Frame f = phd::frame(a->genome, a->growth);
+            const gfx::creature::Body body = gfx::animal_body(a->genome, a->growth);
+            // A mark at its feet.
+            float sx, sy;
+            const float reach = animal_on_screen(*a, sx, sy);
+            const gfx::Color mark{255, 240, 120, 230};
+            const float r = std::min(reach, 60.0f), tick = std::max(4.0f, r / 3);
+            for (int k = 0; k < 4; ++k) {
+                const float cx = sx + (k % 2 ? r : -r), cy = sy + (k / 2 ? r : -r);
+                font.rect(batch, std::min(cx, cx + (k % 2 ? -tick : tick)), cy - 1, std::max(cx, cx + (k % 2 ? -tick : tick)), cy + 1, mark);
+                font.rect(batch, cx - 1, std::min(cy, cy + (k / 2 ? -tick : tick)), cx + 1, std::max(cy, cy + (k / 2 ? -tick : tick)), mark);
+            }
+
+            const float px = float(width) - panel_width, left = px + 10, right = float(width) - 10;
+            font.rect(batch, px, 0, float(width), float(view_height), panel);
+            // What its organs make it, in a word; there are no kinds of animal.
+            const char* plan = f.air_speed ? "FLIER" : !f.breathes_air ? "SWIMMER" : f.breathes_water || f.fin ? "AMPHIBIAN"
+                               : f.leg_pairs ? "WALKER" : "CRAWLER";
+            font.text(batch, left, 10, format("%s %u", plan, a->id), 2, accent);
+            font.text(batch, left, 30, format("AGE %d DAYS  YOUNG %d", a->age, a->young), 2, dim);
+
+            // Its organs, from the side, to scale with each other: trunk, neck
+            // and head, tail, legs, a wing over its back, fins.
+            {
+                const auto shade = [](gfx::Color c, float k) {
+                    return gfx::Color{std::uint8_t(c.r * k), std::uint8_t(c.g * k), std::uint8_t(c.b * k), 255};
+                };
+                const float span = body.tail + body.length + body.neck + body.head + body.snout;
+                const float tall = body.leg_length + body.girth * 2 + std::max(body.wing * 0.45f, body.dorsal_fin);
+                const float scale = std::min((right - left) / span, 78.0f / std::max(tall, 0.01f));
+                const float x0 = left + ((right - left) - span * scale) / 2;
+                const float top = 52 + std::max(body.wing * 0.45f, body.dorsal_fin) * scale + 4;
+                const float back = top, belly = top + body.girth * 2 * scale, mid = (back + belly) / 2;
+                const float hip = x0 + body.tail * scale, shoulder = hip + body.length * scale;
+                font.rect(batch, x0, mid - std::max(1.5f, body.girth * 0.3f * scale), hip + 2, mid + std::max(1.5f, body.girth * 0.3f * scale),
+                          shade(body.primary, 0.85f));
+                if (body.tail_fin > 0) {
+                    font.rect(batch, x0 - body.tail_fin * scale * 0.5f, mid - body.tail_fin * scale, x0 + 2, mid + body.tail_fin * scale,
+                              shade(body.primary, 0.7f));
+                }
+                for (int k = 0; k < body.leg_pairs; ++k) {
+                    const float at = body.leg_pairs == 1 ? 0.5f : float(k) / float(body.leg_pairs - 1);
+                    const float lx = hip + 4 + (shoulder - hip - 8) * at, wide = std::max(1.5f, body.leg_girth * scale);
+                    font.rect(batch, lx - wide, belly - 2, lx + wide, belly + body.leg_length * (1 - 0.5f * body.sprawl) * scale,
+                              shade(body.primary, 0.6f));
+                }
+                font.rect(batch, hip, back, shoulder, belly, body.primary);
+                if (body.pattern == gfx::creature::Pattern::pale_belly) {
+                    font.rect(batch, hip, belly - body.girth * 0.6f * scale, shoulder, belly, body.secondary);
+                } else if (body.pattern != gfx::creature::Pattern::plain) {
+                    for (float bx = hip + 4; bx < shoulder - 3; bx += 9) {
+                        const bool stripes = body.pattern == gfx::creature::Pattern::stripes;
+                        font.rect(batch, bx, stripes ? back : mid - 3, bx + 3, stripes ? belly : mid, body.secondary);
+                    }
+                }
+                const float head = body.head * scale, neck_end = shoulder + body.neck * scale;
+                const float lift = f.leg_pairs && !f.fin ? body.neck * scale * 0.6f : 0;
+                font.rect(batch, shoulder - 2, mid - lift - head * 0.7f, neck_end + 1, mid - lift * 0.3f + head * 0.7f, shade(body.primary, 0.92f));
+                font.rect(batch, neck_end, mid - lift - head, neck_end + (body.head + body.snout) * scale, mid - lift + head, body.primary);
+                font.rect(batch, neck_end + head * 0.7f, mid - lift - head * 0.5f, neck_end + head * 0.7f + 2, mid - lift - head * 0.5f + 2,
+                          {20, 20, 24, 255});
+                if (body.wing > 0) {
+                    font.rect(batch, hip + (shoulder - hip) * 0.25f, back - body.wing * 0.45f * scale, hip + (shoulder - hip) * 0.8f, back + 2,
+                              shade(body.primary, 0.75f));
+                }
+                if (body.dorsal_fin > 0) {
+                    font.rect(batch, hip + (shoulder - hip) * 0.35f, back - body.dorsal_fin * scale, hip + (shoulder - hip) * 0.7f, back + 1,
+                              shade(body.primary, 0.7f));
+                    font.rect(batch, hip + (shoulder - hip) * 0.55f, belly - 1, hip + (shoulder - hip) * 0.75f, belly + body.side_fins * scale * 0.6f,
+                              shade(body.primary, 0.7f));
+                }
+            }
+
+            // Bars: energy, health, breath.
+            float y = 146;
+            const auto bar = [&](const char* name, int value, int full, gfx::Color color) {
+                font.text(batch, left, y, name, 2, white);
+                const float x0 = left + 88, x1 = right;
+                font.rect(batch, x0, y + 1, x1, y + 13, {40, 48, 44, 255});
+                font.rect(batch, x0, y + 1, x0 + (x1 - x0) * std::clamp(float(value) / float(std::max(1, full)), 0.0f, 1.0f), y + 13, color);
+                y += 20;
+            };
+            bar("ENERGY", a->energy, f.store, {214, 178, 72, 255});
+            bar("HEALTH", a->health, 255, {188, 84, 70, 255});
+            bar("BREATH", a->breath, phd::breath_ticks, {96, 168, 204, 255});
+
+            const auto medium = phd::Medium(a->medium);
+            const char* doing = a->eating < 4 ? "GRAZING" : medium == phd::Medium::air ? "FLYING" : medium == phd::Medium::water ? "SWIMMING"
+                                : a->pace == 0 ? "RESTING" : "WALKING";
+            const auto speed = [](int v) { return double(v) * phd::cell_decimetres / 256.0; }; // m a second
+            std::vector<std::string> lines = {
+                doing,
+                a->growth < 255 ? format("JUVENILE %d%% GROWN", (a->growth - phd::newborn_growth) * 100 / (255 - phd::newborn_growth))
+                                : a->drive >= phd::mating_drive ? std::string("SEEKING A MATE") : std::string("ADULT"),
+                a->mother ? format("OF %u AND %u", a->mother, a->father) : std::string("A FOUNDER"),
+                f.mass >= 1000 ? format("%.2f M  %.1f KG", f.length / 1000.0, f.mass / 1000.0) : format("%.2f M  %d G", f.length / 1000.0, f.mass),
+                f.leg_pairs ? format("LEGS %d PAIRS %.2f M", f.leg_pairs, f.leg / 1000.0) : std::string("NO LEGS"),
+            };
+            if (f.wing) {
+                lines.push_back(format("WINGS %.2f M%s", f.wing / 1000.0, f.air_speed ? "" : " SMALL"));
+            }
+            lines.push_back(std::string(f.breathes_air && f.breathes_water ? "LUNGS AND GILLS" : f.breathes_air ? "LUNGS" : "GILLS") +
+                            (f.fin ? "  FINS" : ""));
+            lines.push_back(a->genome.gene[phd::agene_plant_gut] >= 32 ? "EATS PLANTS" : "EATS NOTHING YET");
+            lines.push_back(format("LAND %.1f WATER %.1f", speed(f.land_speed), speed(f.water_speed)));
+            if (f.air_speed) {
+                lines.push_back(format("AIR %.1f M/S", speed(f.air_speed)));
+            }
+            for (const auto& line : lines) {
+                font.text(batch, left, y + 4, line, 2, &line == &lines[0] ? accent : white);
+                y += 17;
+            }
+            // Its brain at work: what it senses, what each hidden unit says,
+            // and what comes out. Green for more, red for less.
+            {
+                const auto index = std::size_t(a - world.animals().data());
+                const phd::brain::Senses sensed = world.senses(index);
+                const phd::brain::Decision thought = phd::brain::think(sensed, world.brain_of(index));
+                const auto lamp = [&](float x0, float x1, float row, int value) {
+                    const float m = std::min(1.0f, std::abs(float(value)) / 96.0f);
+                    const gfx::Color c = value > 0 ? gfx::Color{std::uint8_t(40 + 40 * m), std::uint8_t(60 + 180 * m), std::uint8_t(50 + 40 * m), 255}
+                                         : value < 0 ? gfx::Color{std::uint8_t(60 + 180 * m), std::uint8_t(44 + 20 * m), std::uint8_t(40 + 20 * m), 255}
+                                                     : gfx::Color{36, 42, 40, 255};
+                    font.rect(batch, x0, row, x1 - 1, row + 6, c);
+                };
+                const float top = float(view_height) - 68, span = right - left;
+                for (int i = 0; i < phd::brain::inputs; ++i) {
+                    lamp(left + span * float(i) / phd::brain::inputs, left + span * float(i + 1) / phd::brain::inputs, top, sensed.in[i]);
+                }
+                for (int i = 0; i < phd::brain::hidden; ++i) {
+                    lamp(left + span * float(i) / phd::brain::hidden, left + span * float(i + 1) / phd::brain::hidden, top + 7, thought.unit[i]);
+                }
+                for (int i = 0; i < phd::brain::outputs; ++i) {
+                    lamp(left + span * float(i) / phd::brain::outputs, left + span * float(i + 1) / phd::brain::outputs, top + 14, thought.out[i]);
+                }
+            }
+            font.text(batch, left, float(view_height) - 42, following ? "DRAG VIEW TO STOP" : "TAP IT TO FOLLOW", 2, dim);
+            font.text(batch, left, float(view_height) - 22, "TAP HERE TO CLOSE", 2, dim);
         }
 
         // The cell inspector.
@@ -602,7 +884,7 @@ int main(int argc, char** argv) {
         if (hud) {
             const double pi_ms = tick_ms * pi_factor;
             const std::string lines[] = {
-                format("TICK %.3f MS  PI~%.2f/%.0f MS", tick_ms, pi_ms, pi_tick_budget_ms),
+                format("TICK %" PRIu64 "  %.3f MS  PI~%.2f/%.0f MS", world.tick(), tick_ms, pi_ms, pi_tick_budget_ms),
                 format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f  PITCH %.0f%s", frame_ms, fps, camera.zoom,
                        camera.pitch(), camera.top_down ? " LOCK" : tilt_enabled ? "" : " FLAT"),
                 format("DRAWS %d  TRIS %d  BAKE %.2f MS  %dX%d Z%d", world_draws + batch.draw_calls(),

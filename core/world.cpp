@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "fnv.hpp"
 #include "math.hpp"
@@ -25,7 +26,7 @@ constexpr std::uint32_t river_min_flow = 3000;
 constexpr int lake_start_level = 700;
 
 constexpr char save_magic[4] = {'P', 'H', 'D', 'W'};
-constexpr std::uint32_t save_version = 5; // 5 added snags; a version 4 save loads with none
+constexpr std::uint32_t save_version = 12; // 5 added snags, 6 the layout, 7 the corrected flood extent, 8 the sky at the saved tick, 9 animals, 10 their young, 11 their brains, 12 scents and calls
 
 // Little-endian serialisation of integers and arrays of them.
 struct Writer {
@@ -81,7 +82,7 @@ World::World(const WorldConfig& config)
       weather_rng_(stream_seed(config.seed, purpose_weather)),
       plant_rng_(stream_seed(config.seed, purpose_plants)),
       fire_rng_(stream_seed(config.seed, purpose_fire)) {
-    terrain_.generate(config.seed, config.width, config.height, config.ocean_percent);
+    terrain_.generate(config.seed, config.width, config.height, config.ocean_percent, config.layout);
     const auto n = cells();
     water_.assign(n, 0);
     depth_.assign(n, 0);
@@ -96,8 +97,11 @@ World::World(const WorldConfig& config)
     biome_.assign(n, 0);
     lakes_.assign(terrain_.basins.size(), LakeState{lake_start_level, 0});
     lake_area_.assign(lakes_.size(), 0);
+    lake_surfaces_.resize(lakes_.size());
     fronts_.reserve(max_fronts);
     plants_.assign(max_plants, Plant{});
+    animals_.reserve(max_animals);
+    brains_.reserve(max_animals);
     free_.resize(max_plants);
     for (int k = 0; k < max_plants; ++k) {
         free_[std::size_t(k)] = std::uint32_t(max_plants - 1 - k); // index 0 comes out first
@@ -183,6 +187,9 @@ void World::step() {
     if (tick_ % 2 == 0) {
         update_fire();
     }
+    if (!animals_.empty()) {
+        update_animals();
+    }
 }
 
 void World::update_wind() {
@@ -193,6 +200,81 @@ void World::update_wind() {
     wind_speed_ = std::clamp(wind_speed_ + int(weather_rng_.below(std::uint32_t(2 * gusty + 1))) - gusty, 16, 96);
 }
 
+namespace {
+
+// One storm crosses the development map every two simulation days. Vary
+// the arrival and duration by seed and passage; the quiet interval lets
+// the flooded low ground drain before the next storm arrives.
+struct StormWindow {
+    int age, duration;
+};
+
+StormWindow development_storm(std::uint64_t tick, std::uint32_t seed) {
+    constexpr int interval = 2 * World::ticks_per_day;
+    const auto passage = tick / interval;
+    const auto roll = hash3(int(std::uint32_t(passage)), int(passage >> 32), seed);
+    // Start the showcase storm overnight so its crest is visible in
+    // daylight; later storms cross at different times of day.
+    const int arrival = passage == 0 ? World::ticks_per_day - 25 + int(roll & 31)
+                                     : World::ticks_per_day / 2 + int(roll & 127);
+    const int duration = 152 + int((roll >> 8) & 31);
+    return {int(tick % interval) - arrival, duration};
+}
+
+} // namespace
+
+void World::start_development_front(int duration) {
+    const int w = width(), h = height();
+    const int x = w * (8 + int(weather_rng_.below(10))) / 100;
+    const int y = h * (38 + int(weather_rng_.below(20))) / 100;
+    Front front{};
+    front.x = x * 256 + 128;
+    front.y = y * 256 + 128;
+    front.life = std::uint16_t(duration);
+    front.radius = std::uint16_t(std::max(4, std::min(w, h) * (53 + int(weather_rng_.below(16))) / 100));
+    front.load = 13500 + int(weather_rng_.below(2500));
+    front.vx = std::int16_t(w * 256 / (2 * duration)); // crosses half the map on its own, plus wind
+    front.vy = std::int16_t(int(weather_rng_.below(33)) - 16);
+    front.last_height = terrain_.elevation[std::size_t(y) * w + x];
+    fronts_.push_back(front);
+}
+
+int World::rasterize_front(const Front& front, int load, int boost) {
+    const int cx = floor_div(front.x, 256), cy = floor_div(front.y, 256), r = front.radius;
+    int spent = 0;
+    const int r2 = r * r;
+    const int nx0 = std::max(0, (cx - r) / node), nx1 = std::min(nodes_x_ - 1, (cx + r) / node);
+    const int ny0 = std::max(0, (cy - r) / node), ny1 = std::min(nodes_y_ - 1, (cy + r) / node);
+    for (int ny = ny0; ny <= ny1; ++ny) {
+        for (int nx = nx0; nx <= nx1; ++nx) {
+            const std::int64_t dx = std::int64_t(nx * node + node / 2) * 256 - front.x;
+            const std::int64_t dy = std::int64_t(ny * node + node / 2) * 256 - front.y;
+            const int d2 = int((dx * dx + dy * dy) >> 16);
+            if (d2 >= r2) {
+                continue;
+            }
+            const int weight = (r2 - d2) * 256 / r2;
+            const auto at = std::size_t(ny * nodes_x_ + nx);
+            cloud_[at] = static_cast<std::uint8_t>(
+                std::min(255, cloud_[at] + weight * std::min(load, 6000) / 6000));
+            if (load > 800) {
+                const int rain = int(std::int64_t(weight) * load / 98304 * boost / 256);
+                rain_[at] = static_cast<std::uint8_t>(std::min(255, rain_[at] + rain));
+                spent += rain;
+            }
+        }
+    }
+    return spent;
+}
+
+void World::restore_weather_from_fronts() {
+    // Older saves captured the moving fronts but omitted their last rain
+    // and cloud samples. Repaint in place without advancing the weather.
+    std::fill(rain_.begin(), rain_.end(), 0);
+    std::fill(cloud_.begin(), cloud_.end(), 0);
+    for (const auto& front : fronts_) rasterize_front(front, front.load, 256);
+}
+
 void World::update_fronts() {
     std::fill(rain_.begin(), rain_.end(), 0);
     std::fill(cloud_.begin(), cloud_.end(), 0);
@@ -201,7 +283,12 @@ void World::update_fronts() {
     // Wetter springs and autumns, drier summers and winters. A front is
     // bigger than much of the valley: its edges and paths are what vary.
     const int chance = 5 + (icos(2 * season_angle()) + 1024) * 8 / 2048;
-    if (int(fronts_.size()) < max_fronts && int(weather_rng_.below(1024)) < chance) {
+    StormWindow storm{};
+    const bool development = config_.layout == Layout::development;
+    if (development) {
+        storm = development_storm(tick_, config_.seed);
+        if (storm.age == 0 && fronts_.empty()) start_development_front(storm.duration);
+    } else if (int(fronts_.size()) < max_fronts && int(weather_rng_.below(1024)) < chance) {
         int x = 0, y = 0;
         for (int attempt = 0; attempt < 6; ++attempt) {
             x = int(weather_rng_.below(std::uint32_t(w)));
@@ -224,6 +311,18 @@ void World::update_fronts() {
 
     const int wind_x = icos(wind_angle_) * wind_speed_ / 1024, wind_y = isin(wind_angle_) * wind_speed_ / 1024;
     for (auto& front : fronts_) {
+        int strength = 256;
+        if (development) {
+            // Incoming fronts gather over the west, then dissipate over the
+            // east. Let old, larger save-file storms taper off during a lull.
+            constexpr int build_ticks = 20, fade_ticks = 40;
+            const bool in_window = storm.age >= 0 && storm.age < storm.duration;
+            const bool old_front = fronts_.size() > 1 || front.life > storm.duration;
+            const int remaining = in_window && !old_front ? storm.duration - storm.age : fade_ticks;
+            front.life = std::min(front.life, std::uint16_t(remaining));
+            const int build = in_window ? (storm.age + 1) * 256 / build_ticks : 256;
+            strength = std::min({256, build, int(front.life) * 256 / fade_ticks});
+        }
         front.x += front.vx + wind_x;
         front.y += front.vy + wind_y;
         if (front.life) {
@@ -245,32 +344,11 @@ void World::update_fronts() {
         front.last_height = terrain_.elevation[centre];
         const int boost = 256 + uplift * 6;
 
-        int spent = 0;
-        const int r2 = r * r;
-        const int nx0 = std::max(0, (cx - r) / node), nx1 = std::min(nodes_x_ - 1, (cx + r) / node);
-        const int ny0 = std::max(0, (cy - r) / node), ny1 = std::min(nodes_y_ - 1, (cy + r) / node);
-        for (int ny = ny0; ny <= ny1; ++ny) {
-            for (int nx = nx0; nx <= nx1; ++nx) {
-                const std::int64_t dx = std::int64_t(nx * node + node / 2) * 256 - front.x;
-                const std::int64_t dy = std::int64_t(ny * node + node / 2) * 256 - front.y;
-                const int d2 = int((dx * dx + dy * dy) >> 16);
-                if (d2 >= r2) {
-                    continue;
-                }
-                const int weight = (r2 - d2) * 256 / r2;
-                const auto at = std::size_t(ny * nodes_x_ + nx);
-                cloud_[at] = static_cast<std::uint8_t>(
-                    std::min(255, cloud_[at] + weight * std::min(front.load, 6000) / 6000));
-                if (front.load > 800) {
-                    const int rain = int(std::int64_t(weight) * front.load / 98304 * boost / 256);
-                    rain_[at] = static_cast<std::uint8_t>(std::min(255, rain_[at] + rain));
-                    spent += rain;
-                }
-            }
-        }
-        front.load -= spent / 40;
+        const int load = front.load * strength / 256;
+        front.load -= rasterize_front(front, load, boost) / 40;
 
-        if (!over_sea && front.load > 4000 && int(weather_rng_.below(4096)) < (front.load - 3000) / 300) {
+        const int charge = front.load * strength / 256;
+        if (!over_sea && charge > 4000 && int(weather_rng_.below(4096)) < (charge - 3000) / 300) {
             const int lx = cx + int(weather_rng_.below(std::uint32_t(r + 1))) - r / 2;
             const int ly = cy + int(weather_rng_.below(std::uint32_t(r + 1))) - r / 2;
             lightning_[lightning_next_] = {tick_, static_cast<std::int16_t>(std::clamp(lx, 0, w - 1)),
@@ -395,13 +473,17 @@ void World::update_hydrology() {
             continue;
         }
         const auto lake = terrain_.basin[i];
-        if (lake && lakes_[lake].level < 1024) {
+        if (lake) {
+            // A lake keeps what flows in until it is all but full. Then it
+            // stays topped up and the water runs on through it, so the
+            // stream below carries what the stream above does.
             lakes_[lake].inflow += accumulated_[i];
-            continue;
+            if (lakes_[lake].level < 1000) {
+                flow_[i] = flow_[i] * 7 / 8;
+                continue;
+            }
         }
-        if (!lake) {
-            flow_[i] = (flow_[i] * 7 + accumulated_[i]) / 8;
-        }
+        flow_[i] = (flow_[i] * 7 + accumulated_[i]) / 8;
         const int down = terrain_.downstream[i];
         if (down >= 0) {
             accumulated_[std::size_t(down)] += accumulated_[i];
@@ -428,6 +510,11 @@ void World::update_hydrology() {
     refresh_water();
 }
 
+int World::nominal_lake_surface_dm(std::size_t id) const {
+    const auto& basin = terrain_.basins[id];
+    return basin.bottom + (basin.spill - basin.bottom) * lakes_[id].level / 1024;
+}
+
 void World::refresh_water() {
     const auto n = cells();
     const int w = config_.width, h = config_.height;
@@ -436,6 +523,9 @@ void World::refresh_water() {
     // mark and only dries below a lower one, so edges that hover on a
     // threshold don't flicker from pass to pass.
     previous_water_ = water_;
+    for (std::size_t id = 1; id < lakes_.size(); ++id) {
+        lake_surfaces_[id] = {nominal_lake_surface_dm(id), 0, -no_stream};
+    }
     for (std::size_t i = 0; i < n; ++i) {
         const int dm = terrain_.elevation[i];
         Water kind = Water::none;
@@ -444,8 +534,7 @@ void World::refresh_water() {
             kind = Water::ocean;
             depth = -dm;
         } else if (const auto id = terrain_.basin[i]) {
-            const auto& basin = terrain_.basins[id];
-            const int surface = basin.bottom + (basin.spill - basin.bottom) * lakes_[id].level / 1024;
+            const int surface = lake_surface_dm(id);
             const bool was = Water(previous_water_[i]) == Water::lake;
             if (surface > dm || (was && surface >= dm - 5)) {
                 kind = Water::lake;
@@ -459,20 +548,75 @@ void World::refresh_water() {
     // Streams: a channel where enough water flows, widening downstream. The
     // banks beside a wide channel flood too, if they are no higher than its
     // surface.
+    // How high each running cell's water stands, from the bottom of every
+    // stream up, so each knows the water it runs into. (Scratch: the surface
+    // in dm above `datum`, or 0 where nothing runs.)
+    constexpr int datum = -4096;
+    auto& surfaces = accumulated_;
+    std::fill(surfaces.begin(), surfaces.end(), 0u);
+    for (const auto at : terrain_.order) {
+        const auto i = std::size_t(at);
+        const bool was = Water(previous_water_[i]) == Water::river;
+        const auto here = Water(water_[i]);
+        // A stream runs on through a full pool in its channel, and is as
+        // deep there as anywhere: the pool stands at the stream's level,
+        // not below it between two deeper reaches.
+        const bool pool = here == Water::lake;
+        if (here == Water::ocean || flow_[i] <= (was || pool ? river_min_flow / 2 : river_min_flow)) {
+            continue;
+        }
+        const int extra = int(isqrt(flow_[i] > river_min_flow ? flow_[i] - river_min_flow : 0));
+        // Its flow makes it this deep only where the land holds it. In a
+        // channel it fills up; on open ground it spreads into a shallow
+        // sheet, and never stands as a wall of water above its banks.
+        const int held = 4 + std::max<int>(terrain_.hollow[i], 0);
+        int depth = std::min({25, 3 + extra / 13, held});
+        // Nor does it stand far above the water it runs into: it eases
+        // down to a lake or the sea, or to a shallower reach, over the
+        // last few cells, unless its bed drops away faster than that.
+        if (const int down = terrain_.downstream[i]; down >= 0) {
+            const auto below = Water(water_[std::size_t(down)]);
+            int level = no_stream, fall = 2;
+            if (below == Water::lake) {
+                // A lake is level: all of it stands where its outlet does,
+                // and no lower than what it holds.
+                level = lake_surface_dm(terrain_.basin[std::size_t(down)]);
+                if (surfaces[std::size_t(down)]) {
+                    level = std::max(level, int(surfaces[std::size_t(down)]) + datum);
+                }
+            } else if (surfaces[std::size_t(down)]) {
+                level = int(surfaces[std::size_t(down)]) + datum;
+            } else if (below == Water::ocean) {
+                level = 0;
+            }
+            if (level != no_stream && pool) {
+                // A pool is level with the water it empties into, however
+                // deep that makes it: its basin holds it.
+                depth = std::max(1, level - terrain_.elevation[i]);
+            } else if (level != no_stream) {
+                depth = std::min(depth, std::max(3, level + fall - terrain_.elevation[i]));
+            }
+        }
+        surfaces[i] = std::uint32_t(terrain_.elevation[i] + depth - datum);
+    }
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const auto i = std::size_t(y) * w + x;
-            const bool was = Water(previous_water_[i]) == Water::river;
-            if (Water(water_[i]) != Water::none || flow_[i] <= (was ? river_min_flow / 2 : river_min_flow)) {
+            if (!surfaces[i]) {
                 continue;
             }
+            const int surface = int(surfaces[i]) + datum, depth = surface - terrain_.elevation[i];
             const int extra = int(isqrt(flow_[i] > river_min_flow ? flow_[i] - river_min_flow : 0));
-            const int depth = std::min(25, 3 + extra / 6);
             const int radius = std::min(2, extra / 40);
-            const int surface = terrain_.elevation[i] + depth;
-            if (Water(water_[i]) == Water::none) {
+            const auto pool = Water(water_[i]) == Water::lake ? terrain_.basin[i] : std::uint16_t(0);
+            // An upstream bank may already cover this channel. Its own
+            // discharge still contributes, and overlapping reaches combine
+            // at their greater depth regardless of cell traversal order.
+            if (pool) {
+                lake_surfaces_[pool].through = std::max(lake_surfaces_[pool].through, surface);
+            } else {
                 water_[i] = std::uint8_t(Water::river);
-                depth_[i] = static_cast<std::uint16_t>(depth);
+                depth_[i] = static_cast<std::uint16_t>(std::max<int>(depth_[i], depth));
             }
             for (int dy = -radius; dy <= radius; ++dy) {
                 for (int dx = -radius; dx <= radius; ++dx) {
@@ -484,13 +628,133 @@ void World::refresh_water() {
                     const auto j = std::size_t(ny) * w + nx;
                     const int bank = surface - terrain_.elevation[j];
                     const bool bank_was = Water(previous_water_[j]) == Water::river;
-                    if (Water(water_[j]) == Water::none && (bank > 2 || (bank_was && bank >= -3))) {
+                    const auto beside = Water(water_[j]);
+                    if (beside != Water::ocean && beside != Water::lake && (bank > 2 || (bank_was && bank >= -1))) {
                         water_[j] = std::uint8_t(Water::river);
-                        depth_[j] = static_cast<std::uint16_t>(std::clamp(bank, 1, depth));
+                        depth_[j] = static_cast<std::uint16_t>(std::max<int>(depth_[j], std::clamp(bank, 1, depth)));
                     }
                 }
             }
         }
+    }
+    fill_flood_pockets();
+    back_up_lakes();
+}
+
+void World::back_up_lakes() {
+    // A flooded river can drown an outlet and back up over a small pond.
+    // Its highest sustainable stage is the lowest escape across the rim:
+    // emerged ground, or the stage of the water standing against it.
+    constexpr int high = std::numeric_limits<int>::max();
+    const int w = width(), h = height();
+    for (std::size_t id = 1; id < lake_surfaces_.size(); ++id) {
+        lake_surfaces_[id].stage = lake_surfaces_[id].lowest_river = high;
+    }
+    for (int i = 0; i < w * h; ++i) {
+        const auto id = terrain_.basin[i];
+        if (!id) continue;
+        auto& rim = lake_surfaces_[id];
+        const int spill = terrain_.basins[id].spill;
+        if (rim.stage <= spill) continue;
+        const int x = i % w, y = i / w;
+        if (x == 0 || y == 0 || x + 1 == w || y + 1 == h) {
+            rim.stage = spill;
+            continue;
+        }
+        // The terrain's drainage uses eight neighbours, including diagonal outlets.
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int j = i + dy * w + dx;
+                if (terrain_.basin[j] == id) continue;
+                int sill = elevation(j);
+                switch (Water(water_[j])) {
+                case Water::river:
+                    rim.lowest_river = std::min(rim.lowest_river, sill);
+                    sill += depth_[j];
+                    break;
+                case Water::lake: sill = std::max(sill, nominal_lake_surface_dm(terrain_.basin[j])); break;
+                case Water::ocean: sill = std::max(sill, 0); break;
+                case Water::none: break;
+                }
+                rim.stage = std::min(rim.stage, sill);
+            }
+        }
+    }
+    bool overtopped = false;
+    for (std::size_t id = 1; id < lakes_.size(); ++id) {
+        auto& rim = lake_surfaces_[id];
+        if (rim.stage <= terrain_.basins[id].spill || rim.lowest_river >= rim.stage) {
+            rim.stage = nominal_lake_surface_dm(id);
+        }
+        rim.stage = std::max(rim.stage, rim.through);
+        overtopped = overtopped || rim.stage > terrain_.basins[id].spill;
+    }
+    if (!overtopped) return;
+    for (std::size_t i = 0; i < cells(); ++i) {
+        const auto id = terrain_.basin[i];
+        if (!id || lake_surface_dm(id) <= terrain_.basins[id].spill) continue;
+        lake_area_[id] += Water(water_[i]) != Water::lake;
+        water_[i] = std::uint8_t(Water::lake);
+        depth_[i] = static_cast<std::uint16_t>(lake_surface_dm(id) - elevation(i));
+    }
+}
+
+void World::fill_flood_pockets() {
+    // When floodwaters from several reaches join, they can surround low
+    // ground beyond any single channel's bank radius. Use the lowest
+    // surrounding waterline as the head available to enter such a pocket.
+    // Both buffers are scratch; runoff has already passed downstream.
+    auto& visited = previous_water_;
+    auto& queue = accumulated_;
+    std::fill(visited.begin(), visited.end(), 0);
+    const int w = width(), h = height();
+    const auto neighbours = [w, h](int i, auto visit) {
+        const int x = i % w;
+        if (x > 0) visit(i - 1);
+        if (x + 1 < w) visit(i + 1);
+        if (i >= w) visit(i - w);
+        if (i + w < w * h) visit(i + w);
+    };
+    for (int start = 0; start < w * h; ++start) {
+        if (Water(water_[start]) != Water::none || visited[start]) continue;
+        int count = 1, surface = 65536;
+        bool open = false, touches_river = false;
+        queue[0] = std::uint32_t(start);
+        visited[start] = 1;
+        for (int k = 0; k < count; ++k) {
+            const int i = int(queue[k]), x = i % w;
+            open |= x == 0 || x + 1 == w || i < w || i + w >= w * h;
+            neighbours(i, [&](int j) {
+                const auto kind = Water(water_[j]);
+                if (kind == Water::none) {
+                    if (!visited[j]) {
+                        visited[j] = 1;
+                        queue[count++] = std::uint32_t(j);
+                    }
+                } else {
+                    const int level = kind == Water::lake ? lake_surface_dm(terrain_.basin[j]) : elevation(j) + depth_[j];
+                    surface = std::min(surface, level);
+                    touches_river |= kind == Water::river;
+                    visited[i] = 2; // this dry cell touches water
+                }
+            });
+        }
+        if (open || !touches_river) continue;
+        // Enter through a submerged bank. An emerged ridge protects dry
+        // ground behind it, even when that ground lies below this level.
+        int flooded = 0;
+        const auto flood = [&](int i) {
+            if (Water(water_[i]) == Water::none && elevation(i) < surface) {
+                water_[i] = std::uint8_t(Water::river);
+                depth_[i] = static_cast<std::uint16_t>(surface - elevation(i));
+                queue[flooded++] = std::uint32_t(i);
+            }
+        };
+        for (int k = 0; k < count; ++k) {
+            const int i = int(queue[k]);
+            if (visited[i] == 2) flood(i);
+        }
+        for (int k = 0; k < flooded; ++k) neighbours(int(queue[k]), flood);
     }
 }
 
@@ -609,6 +873,9 @@ std::uint64_t World::fingerprint() const {
     hash.add(std::uint32_t(config_.ocean_percent));
     hash.add(config_.climate);
     hash.add(config_.seasons);
+    if (config_.layout != Layout::valley) {
+        hash.add(std::uint32_t(config_.layout)); // a valley's fingerprint is what it was before layouts
+    }
     hash.add(tick_);
     hash.add(weather_rng_.state());
     hash.add(std::uint32_t(wind_angle_));
@@ -675,6 +942,48 @@ std::uint64_t World::fingerprint() const {
     all(burnt_);
     all(canopy_height_);
     all(canopy_cover_);
+    // A world without animals has the fingerprint it had before there were any.
+    if (!animals_.empty()) {
+        for (const auto* field : {&scent_plant_, &scent_animal_, &scent_ready_, &scent_legs_, &scent_water_, &scent_wings_}) {
+            for (const auto v : *field) {
+                hash.add(v);
+            }
+        }
+        for (const Call& call : calls_) {
+            hash.add(call.x);
+            hash.add(call.y);
+            hash.add(call.caller);
+            hash.add(call.tick);
+            hash.add(call.pitch);
+            hash.add(call.loud);
+        }
+    }
+    for (const auto& a : animals_) {
+        hash.add(a.id);
+        hash.add(a.lineage);
+        hash.add(a.x);
+        hash.add(a.y);
+        hash.add(a.z);
+        hash.add(a.heading);
+        hash.add(a.turn);
+        hash.add(a.pace);
+        hash.add(a.medium);
+        hash.add(a.health);
+        hash.add(a.eating);
+        hash.add(a.breath);
+        hash.add(a.age);
+        hash.add(a.growth);
+        hash.add(a.drive);
+        hash.add(a.young);
+        hash.add(a.mother);
+        hash.add(a.father);
+        hash.add(a.wants);
+        hash.bytes(reinterpret_cast<const std::uint8_t*>(a.memory), sizeof(a.memory));
+        hash.bytes(reinterpret_cast<const std::uint8_t*>(brains_[std::size_t(&a - animals_.data())].weight), brain::bytes);
+        hash.add(a.stride);
+        hash.add(a.energy);
+        hash.bytes(a.genome.gene, agene_count);
+    }
     return hash.value();
 }
 
@@ -688,7 +997,7 @@ std::size_t World::memory_bytes() const {
            bytes(runoff_) + bytes(flow_) + bytes(biome_) + bytes(lakes_) + fronts_.capacity() * sizeof(Front) +
            bytes(rain_) + bytes(cloud_) + bytes(accumulated_) + bytes(plants_) + bytes(free_) + bytes(occupancy_) +
            bytes(canopy_height_) + bytes(canopy_cover_) + bytes(litter_) + bytes(fire_) + bytes(fire_next_) + bytes(burnt_) +
-           bytes(previous_water_) + bytes(lake_area_);
+           bytes(previous_water_) + bytes(lake_area_) + bytes(lake_surfaces_);
 }
 
 // Layout, little-endian: magic, version, the config, the clock and weather,
@@ -704,6 +1013,7 @@ std::vector<std::uint8_t> World::save() const {
     w.put(std::uint32_t(config_.ocean_percent));
     w.put(config_.climate);
     w.put(config_.seasons);
+    w.put(std::uint32_t(config_.layout));
     w.put(tick_);
     w.put(weather_rng_.state());
     w.put(std::uint32_t(wind_angle_));
@@ -772,6 +1082,56 @@ std::vector<std::uint8_t> World::save() const {
     w.array(snag_height_);
     w.array(snag_rot_);
     w.array(snag_place_);
+    w.array(rain_);
+    w.array(cloud_);
+    w.put(std::uint8_t(brain_mode_));
+    w.put(std::uint32_t(scent_plant_.size()));
+    for (const auto* field : {&scent_plant_, &scent_animal_, &scent_ready_, &scent_legs_, &scent_water_, &scent_wings_}) {
+        w.array(*field);
+    }
+    w.put(std::uint32_t(calls_.size()));
+    for (const Call& call : calls_) {
+        w.put(call.x);
+        w.put(call.y);
+        w.put(call.caller);
+        w.put(call.tick);
+        w.put(call.pitch);
+        w.put(call.loud);
+    }
+    w.put(next_animal_id_);
+    w.put(std::uint32_t(animals_.size()));
+    for (const auto& a : animals_) {
+        w.put(a.id);
+        w.put(a.lineage);
+        w.put(a.x);
+        w.put(a.y);
+        w.put(a.z);
+        w.put(a.heading);
+        w.put(a.turn);
+        w.put(a.pace);
+        w.put(a.medium);
+        w.put(a.health);
+        w.put(a.eating);
+        w.put(a.breath);
+        w.put(a.age);
+        w.put(a.growth);
+        w.put(a.drive);
+        w.put(a.young);
+        w.put(a.mother);
+        w.put(a.father);
+        w.put(a.wants);
+        for (const auto m : a.memory) {
+            w.put(m);
+        }
+        for (const auto weight : brains_[std::size_t(&a - animals_.data())].weight) {
+            w.put(weight);
+        }
+        w.put(a.stride);
+        w.put(a.energy);
+        for (const auto gene : a.genome.gene) {
+            w.put(gene);
+        }
+    }
     w.put(checksum(w.out.data(), w.out.size()));
     return std::move(w.out);
 }
@@ -786,7 +1146,7 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
     }
     Reader r{data + 4, data + size - 8};
     const auto version = r.get<std::uint32_t>();
-    if (version != save_version && version != 4) {
+    if (version < 4 || version > save_version) {
         return false;
     }
     WorldConfig config;
@@ -796,6 +1156,13 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
     config.ocean_percent = int(r.get<std::uint32_t>());
     config.climate = r.get<std::int32_t>();
     config.seasons = r.get<std::int32_t>();
+    if (version >= 6) {
+        const auto layout = r.get<std::uint32_t>();
+        if (layout > std::uint32_t(Layout::development)) {
+            return false;
+        }
+        config.layout = Layout(layout);
+    }
     if (!r.ok || config.width <= 0 || config.height <= 0 || config.width > 4096 || config.height > 4096) {
         return false;
     }
@@ -892,15 +1259,120 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
         r.array(world.snag_rot_);
         r.array(world.snag_place_);
     }
+    if (version >= 8) {
+        r.array(world.rain_);
+        r.array(world.cloud_);
+    }
+    if (version >= 9) {
+        if (version >= 11) {
+            world.brain_mode_ = BrainMode(r.get<std::uint8_t>());
+        }
+        if (version >= 12) {
+            const auto nodes = r.get<std::uint32_t>();
+            if (nodes > world.cells()) {
+                return false;
+            }
+            world.scent_w_ = (world.width() + scent_node - 1) / scent_node;
+            world.scent_h_ = (world.height() + scent_node - 1) / scent_node;
+            for (auto* field : {&world.scent_plant_, &world.scent_animal_, &world.scent_ready_, &world.scent_legs_, &world.scent_water_, &world.scent_wings_}) {
+                field->resize(nodes);
+                r.array(*field);
+            }
+            const auto calls = r.get<std::uint32_t>();
+            if (calls > 1024) {
+                return false;
+            }
+            world.calls_.resize(calls);
+            for (Call& call : world.calls_) {
+                call.x = r.get<std::int32_t>();
+                call.y = r.get<std::int32_t>();
+                call.caller = r.get<std::uint32_t>();
+                call.tick = r.get<std::uint32_t>();
+                call.pitch = r.get<std::uint8_t>();
+                call.loud = r.get<std::uint8_t>();
+            }
+        }
+        world.next_animal_id_ = r.get<std::uint32_t>();
+        const auto count = r.get<std::uint32_t>();
+        if (count > std::uint32_t(max_animals)) {
+            return false;
+        }
+        world.animals_.resize(count);
+        world.brains_.assign(count, brain::founder()); // for a save from before there were brains
+        for (auto& a : world.animals_) {
+            a.id = r.get<std::uint32_t>();
+            a.lineage = r.get<std::uint32_t>();
+            a.x = r.get<std::int32_t>();
+            a.y = r.get<std::int32_t>();
+            a.z = r.get<std::int16_t>();
+            a.heading = r.get<std::uint8_t>();
+            a.turn = r.get<std::int8_t>();
+            a.pace = r.get<std::uint8_t>();
+            a.medium = r.get<std::uint8_t>();
+            a.health = r.get<std::uint8_t>();
+            a.eating = r.get<std::uint8_t>();
+            a.breath = r.get<std::uint16_t>();
+            a.age = r.get<std::uint16_t>();
+            a.growth = 255;
+            if (version >= 10) {
+                a.growth = r.get<std::uint8_t>();
+                a.drive = r.get<std::uint8_t>();
+                a.young = r.get<std::uint16_t>();
+                a.mother = r.get<std::uint32_t>();
+                a.father = r.get<std::uint32_t>();
+            }
+            if (version >= 11) {
+                a.wants = r.get<std::uint8_t>();
+                for (auto& m : a.memory) {
+                    m = r.get<std::int8_t>();
+                }
+            }
+            // A brain from before there were noses and ears has the wrong shape:
+            // it is read past, and the animal keeps a founder's.
+            if (version == 11) {
+                for (int k = 0; k < 16 * 47 + 8 * 17; ++k) {
+                    r.get<std::int8_t>();
+                }
+            }
+            if (version >= 12) {
+                for (auto& weight : world.brains_[std::size_t(&a - world.animals_.data())].weight) {
+                    weight = r.get<std::int8_t>();
+                }
+            }
+            a.stride = r.get<std::uint32_t>();
+            a.energy = r.get<std::int32_t>();
+            // Version 9 had two genes fewer: how fast it grows up and how it broods.
+            const int genes = version >= 12 ? agene_count : version >= 11 ? agene_nose : version >= 10 ? agene_eyes : agene_maturity;
+            for (int gene = 0; gene < agene_count; ++gene) {
+                a.genome.gene[gene] = gene < genes ? r.get<std::uint8_t>() : std::uint8_t(96);
+            }
+        }
+    }
     if (!r.ok || r.at != r.end) {
         return false;
     }
-    // The weather grids are rebuilt from the fronts, as at the start of a tick,
-    // and the lake areas from the water.
-    world.lake_area_.assign(world.lakes_.size(), 0);
-    for (std::size_t i = 0; i < world.cells(); ++i) {
-        if (Water(world.water_[i]) == Water::lake) {
-            ++world.lake_area_[world.terrain_.basin[i]];
+    if (version < 8) {
+        world.restore_weather_from_fronts();
+    }
+    if (version < 7) {
+        world.refresh_water();
+        for (int y = 0; y < world.height(); ++y) world.update_biomes(y);
+    } else {
+        world.lake_area_.assign(world.lakes_.size(), 0);
+        for (std::size_t id = 1; id < world.lakes_.size(); ++id) {
+            world.lake_surfaces_[id].stage = world.nominal_lake_surface_dm(id);
+        }
+        for (std::size_t i = 0; i < world.cells(); ++i) {
+            if (Water(world.water_[i]) == Water::lake) {
+                const auto id = world.terrain_.basin[i];
+                ++world.lake_area_[id];
+                // Hysteresis retains a one-dm film even on exposed banks.
+                // Deeper water above spill records an actual flood stage.
+                const int stage = world.elevation(i) + world.water_depth_dm(i);
+                if (world.water_depth_dm(i) > 1 && stage > world.terrain_.basins[id].spill) {
+                    world.lake_surfaces_[id].stage = std::max(world.lake_surfaces_[id].stage, stage);
+                }
+            }
         }
     }
     *this = std::move(world);

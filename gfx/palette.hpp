@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 #include "world.hpp"
 
@@ -56,8 +57,14 @@ inline Rgb water(float depth) {
     return mix(deeper, abyss, (depth - 20) / 60);
 }
 
-// Water over a bed: the bed shows through the first metre.
-inline Rgb shallows(Rgb bed, float depth) { return mix(bed, water(depth), 0.19f + depth); }
+// The same depth bands as the translucent water shader, for the overhead bake.
+inline Rgb shallows(Rgb bed, float depth) {
+    const float t = std::clamp((depth - 3.0f) / 3.0f, 0.0f, 1.0f);
+    const float transmission = std::min(0.45f, 0.74f / (1.0f + 0.70f * depth)) * (1.0f - t * t * (3.0f - 2.0f * t));
+    const float opacity = std::min(1.0f - std::round(transmission * 24.0f) / 24.0f,
+                                   0.22f + (std::floor(depth * 6.0f) + 0.5f) / 6.0f);
+    return mix(bed, water(depth), opacity);
+}
 
 // A plant's leaf pigment now: its leaf gene from yellow-green to blue-green,
 // then the season: autumn colour and bare winter wood for deciduous plants,

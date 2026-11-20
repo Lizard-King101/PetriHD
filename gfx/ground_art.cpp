@@ -6,6 +6,7 @@
 
 #include "math.hpp"
 #include "palette.hpp"
+#include "water_surface.hpp"
 
 namespace art::ground {
 namespace {
@@ -72,12 +73,14 @@ private:
 // once, so a texel blends its four nearest cells without asking the world.
 struct Cells {
     int x0, y0, w, h;
-    std::vector<float> depth, wet, cover, grown, canopy, snow, burnt, frozen, damp;
+    water::Field surface;
+    std::vector<float> wet, cover, grown, canopy, snow, burnt, frozen, damp;
     std::vector<Rgb> soil, bed, pigment; // pigment is weighted by `grown`
 
-    Cells(const phd::World& world, int cx0, int cy0, int cw, int ch) : x0(cx0), y0(cy0), w(cw), h(ch) {
+    Cells(const phd::World& world, int cx0, int cy0, int cw, int ch)
+        : x0(cx0), y0(cy0), w(cw), h(ch), surface(world, cx0, cy0, cw + 1, ch + 1) {
         const std::size_t n = std::size_t(w) * h;
-        for (auto* v : {&depth, &wet, &cover, &grown, &canopy, &snow, &burnt, &frozen, &damp}) {
+        for (auto* v : {&wet, &cover, &grown, &canopy, &snow, &burnt, &frozen, &damp}) {
             v->resize(n);
         }
         soil.resize(n), bed.resize(n), pigment.resize(n);
@@ -87,12 +90,8 @@ struct Cells {
                 const auto cell = std::size_t(cy) * world.width() + cx;
                 const auto at = std::size_t(j) * w + i;
                 const auto kind = world.water(cell);
-                // In decimetres. The sea lies at zero, over ground below it.
-                depth[at] = kind == phd::Water::none    ? 0.0f
-                            : kind == phd::Water::ocean ? float(std::max(0, -world.elevation(cell)))
-                                                        : float(world.water_depth_dm(cell));
                 wet[at] = kind != phd::Water::none;
-                frozen[at] = world.temperature(cell) < -20 && (kind != phd::Water::ocean || depth[at] < 30);
+                frozen[at] = world.temperature(cell) < -20 && (kind != phd::Water::ocean || world.water_depth_dm(cell) < 30);
                 canopy[at] = float(world.canopy_cover(cell)) / 255.0f;
                 snow[at] = float(world.snow(cell));
                 burnt[at] = float(world.burnt(cell)) / 255.0f;
@@ -182,12 +181,11 @@ struct Ground {
 // The ground at one texel (tx, ty at 32 to the cell): soil, low growth, the
 // wet margin, the waterline and the water. Every view's ground comes from
 // here; the bird's-eye bake asks for one texel in eight each way.
-Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n, bool with_water = true) {
-    const float x = (float(tx) + 0.5f) / tpc, y = (float(ty) + 0.5f) / tpc;
-    // The shoreline and the edges of growth wander, so cells don't show.
+Ground ground_at(const Cells& cells, float x, float y, const Noise& n, bool with_water = true) {
+    // Warp the pigment and growth. Water meets the unwarped triangular bed.
     const float warp = (n.warp_fine - 0.5f) * 0.16f + (n.warp_broad - 0.5f) * 0.22f;
     const auto warped = cells.at(x + warp, y + warp), straight = cells.at(x, y);
-    const float depth = Cells::blend(cells.depth, warped), wet = Cells::blend(cells.wet, warped);
+    const float depth = cells.surface.depth(x, y), wet = Cells::blend(cells.wet, warped);
     const float cover = Cells::blend(cells.cover, warped), grown = Cells::blend(cells.grown, warped);
     const float canopy = Cells::blend(cells.canopy, straight);
 
@@ -195,7 +193,7 @@ Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n, bool with_w
     float lush = std::clamp((cover * 0.9f + broad * 0.62f + mottling * 0.25f - wet * 1.85f - 0.37f) * 1.35f, 0.0f, 1.0f);
     lush *= std::clamp(grown * 5, 0.0f, 1.0f); // nothing green where nothing grows
     lush *= 1 - 0.5f * std::clamp((canopy - 0.25f) * 1.6f, 0.0f, 1.0f); // and less in deep shade
-    const float pool = depth + (broad - 0.5f) * 1.1f + (mottling - 0.5f) * 0.7f; // decimetres
+    const float pool = std::max(0.0f, depth) * 10.0f; // decimetres
 
     // Soil: its substrate, lighter and darker in drifts, darker when damp.
     const Rgb earth = Cells::blend(cells.soil, warped);
@@ -208,7 +206,14 @@ Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n, bool with_w
     Rgb turf = palette::turf(pigment, 0.3f + broad * 0.55f + mottling * 0.25f);
     turf = mix(turf, palette::shaded_turf(pigment), canopy * 0.88f);
     Rgb land = mix(soil, turf, lush);
-    land = mix(land, mix(palette::damp_soil, palette::scale(earth, 0.8f), 0.4f), std::clamp((wet - 0.09f) * 3.6f, 0.0f, 0.76f));
+    const Rgb mud = mix(palette::damp_soil, palette::scale(earth, 0.8f), 0.4f);
+    land = mix(land, mud, std::clamp((wet - 0.09f) * 3.6f, 0.0f, 0.76f));
+    // Mud: where the soil is sodden it lies bare in patches, more of them
+    // toward water. The patches are the noise's, not the cells'.
+    const float sodden = Cells::blend(cells.damp, warped);
+    const float boggy = std::clamp((sodden * 0.9f + wet * 1.25f + (broad - 0.5f) * 1.5f + (mottling - 0.5f) * 0.5f - 0.74f) * 6.0f, 0.0f, 1.0f);
+    land = mix(land, light(mud, (grain - 0.5f) * 0.05f - 0.03f * boggy), boggy * 0.9f);
+    lush *= 1 - boggy;
 
     // Burnt ground: char with flecks of ash, fading as it recovers.
     if (const float burnt = Cells::blend(cells.burnt, straight); burnt > 0.01f) {
@@ -226,21 +231,26 @@ Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n, bool with_w
     // Water: the bed through the shallows, then deepening.
     const Rgb floor = Cells::blend(cells.bed, warped);
     const Rgb bed = mix(floor, palette::scale(floor, 0.78f), mottling * 0.65f + grain * 0.35f);
-    Rgb water = palette::shallows(bed, std::max(0.0f, pool) / 10);
-    if (Cells::blend(cells.frozen, straight) > 0.5f) {
-        water = mix(water, palette::ice, grain > 0.9f ? 0.6f : 0.85f);
-    }
-    const float edge = wet - 0.34f;
-    if (!with_water) {
-        water = bed; // the water itself is drawn over this
-    }
-    Rgb color = mix(land, water, edge * 8.0f);
-    if (with_water && edge > 0.015f && edge < 0.052f && mottling > 0.43f) {
-        color = mix(color, palette::waterline, 0.47f);
+    // Above the waterline the bank is mud, reaching up it unevenly: as far
+    // as the noise lets it, and only on the side the water is. The bed
+    // itself shows from just under the surface.
+    const float reach = std::clamp((wet + (broad - 0.5f) * 0.9f + (mottling - 0.5f) * 0.5f - 0.18f) * 3.0f, 0.0f, 1.0f);
+    const float bank = std::clamp(1.0f + (depth - (mottling - 0.5f) * 0.05f) * 8.0f, 0.0f, 1.0f) * reach;
+    Rgb color = mix(mix(land, mud, bank), bed, std::clamp(depth * 9.0f - 0.25f, 0.0f, 1.0f));
+    // Painted water has the close view's ragged edge: the thinnest of it
+    // stands only in the low places of a noise a cell or two across.
+    const bool submerged = depth > water::shore_epsilon + (with_water ? std::max(0.0f, broad * 0.2f + mottling * 0.06f - 0.08f) : 0.0f);
+    if (with_water && submerged) {
+        color = palette::shallows(bed, depth);
+        if (Cells::blend(cells.frozen, straight) > 0.5f) {
+            color = mix(palette::water(depth), palette::ice, grain > 0.9f ? 0.6f : 0.85f);
+        } else if (depth < 0.05f && mottling > 0.43f) {
+            color = mix(color, palette::waterline, 0.47f);
+        }
     }
     const float grain_strength = 0.09f - 0.055f * std::clamp(pool / 12.0f, 0.0f, 1.0f);
     return {light(color, (mottling - 0.5f) * 0.09f + (grain - 0.5f) * grain_strength),
-            std::max(wet, std::clamp(pool / 8.0f, 0.0f, 2.0f)), lush, edge > 0.06f};
+            std::max(wet, std::clamp(pool / 8.0f, 0.0f, 2.0f)), lush, submerged};
 }
 
 void paint_ground(Patch& patch, const Cells& cells, bool with_water) {
@@ -248,7 +258,8 @@ void paint_ground(Patch& patch, const Cells& cells, bool with_water) {
     const Layer layers[5] = {layer(0), layer(1), layer(2), layer(3), layer(4)};
     for (int ty = patch.ty0; ty < patch.ty0 + patch.h; ++ty) {
         for (int tx = patch.tx0; tx < patch.tx0 + patch.w; ++tx) {
-            const Ground g = ground_at(cells, tx, ty, {layers[0](tx, ty), layers[1](tx, ty), layers[2](tx, ty), layers[3](tx, ty), layers[4](tx, ty)}, with_water);
+            const Ground g = ground_at(cells, (float(tx) + 0.5f) / tpc, (float(ty) + 0.5f) / tpc,
+                                       {layers[0](tx, ty), layers[1](tx, ty), layers[2](tx, ty), layers[3](tx, ty), layers[4](tx, ty)}, with_water);
             const auto at = patch.index(tx, ty);
             patch.ground[at] = g.color;
             patch.dampness[at] = g.dampness;
@@ -353,8 +364,9 @@ void sample(const phd::World& world, int tx0, int ty0, int w, int h, int per_cel
         for (int i = 0; i < w; ++i) {
             // The middle of this texel, in the painting's own texels.
             const int tx = (tx0 + i) * step + step / 2, ty = (ty0 + j) * step + step / 2;
-            const Ground g = ground_at(cells, tx, ty, {layers[0](tx, ty), layers[1](tx, ty), layers[2](tx, ty), layers[3](tx, ty),
-                                                       noise(tx, ty, periods[4], salts[4])});
+            const Ground g = ground_at(cells, (float(tx0 + i) + 0.5f) / per_cell, (float(ty0 + j) + 0.5f) / per_cell,
+                                       {layers[0](tx, ty), layers[1](tx, ty), layers[2](tx, ty), layers[3](tx, ty),
+                                        noise(tx, ty, periods[4], salts[4])});
             auto* out = rgb + (std::size_t(j) * w + i) * 3;
             out[0] = byte(g.color.r), out[1] = byte(g.color.g), out[2] = byte(g.color.b);
             water[std::size_t(j) * w + i] = g.water;
@@ -362,14 +374,24 @@ void sample(const phd::World& world, int tx0, int ty0, int w, int h, int per_cel
     }
 }
 
-std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h, bool water) {
+std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h) {
     std::uint32_t sum = std::uint32_t(world.season()) + 1;
+    // The painted margin reaches the next cell. Its corners may inherit a
+    // water level from one further corner and the cells touching it.
+    for (int cy = std::max(0, cy0 - 3); cy < std::min(world.height(), cy0 + h + 3); ++cy) {
+        for (int cx = std::max(0, cx0 - 3); cx < std::min(world.width(), cx0 + w + 3); ++cx) {
+            const auto cell = std::size_t(cy) * world.width() + cx;
+            const auto kind = world.water(cell);
+            const int level = kind == phd::Water::lake ? world.lake_surface_dm(world.terrain().basin[cell])
+                                                       : world.water_depth_dm(cell);
+            sum = sum * 31 + std::uint32_t(kind) + (std::uint32_t(level) << 2);
+        }
+    }
     for (int cy = std::max(0, cy0 - 1); cy < std::min(world.height(), cy0 + h + 1); ++cy) {
         for (int cx = std::max(0, cx0 - 1); cx < std::min(world.width(), cx0 + w + 1); ++cx) {
             const auto cell = std::size_t(cy) * world.width() + cx;
             // Each is taken as coarsely as the painting shows it.
-            std::uint32_t v = std::uint32_t(world.water(cell)) | std::uint32_t(water ? world.water_depth_dm(cell) : 0) << 3;
-            v = v * 31 + std::uint32_t(world.snow(cell) / 10);
+            std::uint32_t v = std::uint32_t(world.snow(cell) / 10);
             v = v * 31 + std::uint32_t(world.burnt(cell) / 24);
             v = v * 31 + std::uint32_t(world.canopy_cover(cell) / 32);
             v = v * 31 + std::uint32_t(std::max(0, world.soil_water(cell) - 90) / 40);

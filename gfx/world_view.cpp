@@ -309,32 +309,32 @@ void WorldView::draw(Batch& batch, const Font& font, const phd::World& world, co
         // own column and falls again and again; it shows while the ground
         // under it is being rained on, more of them the harder it rains.
         const float wind = float(phd::icos(world.wind_angle())) / 1024.0f * float(world.wind_speed()) / 96.0f;
-        const auto falling = [&](float px, float py, bool& snowing) {
+        const auto falling = [&](float px, float py, bool snow, int roll) {
             const int cx = std::clamp(int(left + px / zoom), 0, world.width() - 1);
             const int cy = std::clamp(int(top + py / (zoom * tilt)), 0, world.height() - 1);
-            snowing = world.temperature(std::size_t(cy) * world.width() + cx) < 0;
-            return world.rain(std::min(world.nodes_x() - 1, cx / phd::World::node), std::min(world.nodes_y() - 1, cy / phd::World::node));
+            if (snow != (world.temperature(std::size_t(cy) * world.width() + cx) < 0)) return false;
+            const int rain = world.rain_at(cx, cy);
+            return rain >= 3 && roll < std::min(255, rain * 14);
         };
         const float w = float(view_w), h = float(view_h);
         for (int i = 0; i < 280; ++i) {
             const auto hsh = phd::hash3(i, 17, 0x7a11u);
             const float home = float(hsh & 1023) / 1023.0f * (w + 60) - 30, start = float(hsh >> 10 & 1023) / 1023.0f;
-            bool snowing = false;
-            const int rain = falling(std::clamp(home, 0.0f, w - 1), h / 2, snowing);
-            if (rain < 3 || int(hsh >> 20 & 255) >= std::min(255, rain * 14)) {
-                continue;
-            }
-            if (snowing) {
-                const float fall = std::fmod(start + float(time) * (0.10f + 0.06f * float(hsh >> 28) / 15.0f), 1.0f);
-                const float px = std::floor(home + wind * 40 * fall + std::sin(float(time) * 1.3f + float(i)) * 3);
-                const float py = std::floor(fall * (h + 8) - 4), size = (hsh >> 9 & 3) == 0 ? 2.0f : 1.0f;
-                font.rect(batch, px, py, px + size, py + size, {240, 244, 250, 220});
-            } else {
-                const float fall = std::fmod(start + float(time) * (1.3f + 0.5f * float(hsh >> 28) / 15.0f), 1.0f);
-                const float py = std::floor(fall * (h + 20) - 10), lean = wind * 5;
-                const float px = std::floor(home + wind * 60 * fall);
+            const int roll = int(hsh >> 20 & 255);
+            const float speed = float(hsh >> 28) / 15.0f;
+            const float fall = std::fmod(start + float(time) * (1.3f + 0.5f * speed), 1.0f);
+            const float px = std::floor(home + wind * 60 * fall), py = std::floor(fall * (h + 20) - 10);
+            if (falling(px, py, false, roll)) {
+                const float lean = wind * 5;
                 font.rect(batch, px, py, px + 1, py + 4, {170, 190, 230, 110});
                 font.rect(batch, px + std::floor(lean + 0.5f), py + 4, px + std::floor(lean + 0.5f) + 1, py + 8, {170, 190, 230, 110});
+            }
+            const float drift = std::fmod(start + float(time) * (0.10f + 0.06f * speed), 1.0f);
+            const float fx = std::floor(home + wind * 40 * drift + std::sin(float(time) * 1.3f + float(i)) * 3);
+            const float fy = std::floor(drift * (h + 8) - 4);
+            if (falling(fx, fy, true, roll)) {
+                const float size = (hsh >> 9 & 3) == 0 ? 2.0f : 1.0f;
+                font.rect(batch, fx, fy, fx + size, fy + size, {240, 244, 250, 220});
             }
         }
         // Where rain lands: a short pale dash for a moment.
@@ -342,9 +342,7 @@ void WorldView::draw(Batch& batch, const Font& font, const phd::World& world, co
         for (int i = 0; i < 90; ++i) {
             const auto hsh = phd::hash3(i, 23, beat);
             const float px = std::floor(float(hsh & 1023) / 1023.0f * w), py = std::floor(float(hsh >> 10 & 1023) / 1023.0f * h);
-            bool snowing = false;
-            const int rain = falling(px, py, snowing);
-            if (rain >= 3 && !snowing && int(hsh >> 20 & 255) < std::min(255, rain * 14)) {
+            if (falling(px, py, false, int(hsh >> 20 & 255))) {
                 font.rect(batch, px, py, px + 3, py + 1, {200, 214, 236, 80});
             }
         }
