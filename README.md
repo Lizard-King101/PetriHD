@@ -39,7 +39,11 @@ ctest --test-dir build
 ## Shoreline art study
 
 Run `build/petrihd --shoreline-study` to explore the painted foliage, ground
-and shallows at the reference bank. This study opens seed 1 at tick 120,
+and shallows at the reference bank. Every plant there is a pixel-art sprite,
+painted once from the plant's size, kind, colour and season
+(`gfx/plant_sprites.cpp`); `build/petrihd-sprites sheet.png` paints a sheet
+of them without opening a window. What works and what doesn't is in
+[docs/SHORELINE_REVIEW.md](docs/SHORELINE_REVIEW.md). This study opens seed 1 at tick 120,
 centered on cell (186, 73), at 64 pixels per cell with a 55° camera pitch.
 The detailed ground is baked at startup for a 24 × 24-cell patch around the
 bank. Drag to pan, and scroll or pinch to zoom. The study starts paused. Press Space

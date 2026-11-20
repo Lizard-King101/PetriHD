@@ -20,12 +20,15 @@ add_library(petrihd_core core/world.cpp core/terrain.cpp core/plants.cpp core/fi
 target_include_directories(petrihd_core PUBLIC core)
 
 # Terrain art: no GL, so headless screenshots match the window.
-add_library(petrihd_art gfx/terrain_art.cpp)
+add_library(petrihd_art gfx/terrain_art.cpp gfx/plant_sprites.cpp)
 target_include_directories(petrihd_art PUBLIC gfx)
 target_link_libraries(petrihd_art PUBLIC petrihd_core)
 
 add_executable(petrihd-run apps/petrihd_run.cpp)
 target_link_libraries(petrihd-run PRIVATE petrihd_art)
+
+add_executable(petrihd-sprites tools/sprite_sheet.cpp)
+target_link_libraries(petrihd-sprites PRIVATE petrihd_art)
 
 enable_testing()
 add_executable(petrihd_core_tests tests/core_test.cpp)

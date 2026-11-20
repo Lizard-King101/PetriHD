@@ -58,6 +58,41 @@ in place. Tilting turns about the ground at the focus, not about sea level.
   frame from flat-shaded boxes and frustums. They stand on `TiltView::ground`,
   which follows the mesh's own triangles, so feet stay on the drawn surface.
 
+## Plant sprites (shoreline study)
+
+With `--shoreline-study`, plants are not built from triangles. Each is a
+sprite painted on the CPU (`gfx/plant_sprites.cpp`, no GL) as it looks from
+the three-quarter camera, at 32 texels per cell: one texel per art pixel at
+64 px per cell. A bigger plant gets more pixels, never bigger ones.
+
+![Crowns, trunks and boughs, then bushes, grasses and reeds](images/plant_sprites.png)
+
+- **Kinds:** bush, cone-shaped bush, grass and reed, and the pieces of
+  trees: crown, trunk and conifer bough. Each has a leafless or withered form. Size, leaf colour, flowers and a
+  shape variant come from the plant, quantised so similar plants share a
+  sprite.
+- **Atlas:** sprites are painted as plants need them into one 2048 × 2048
+  texture, on shelves by height. When it is full, a plant takes the nearest
+  sprite already painted, and the atlas is emptied and repainted every 600
+  frames.
+- **Drawing:** one upright quad per sprite, hung from a spot in the world.
+  The vertex shader snaps that spot to a whole pixel and offsets the corners
+  in texels, so sprites sit on the pixel grid. A sprite takes the depth of
+  its spot; the fragment shader discards clear texels.
+- **Trees follow the tilt.** A tree is a trunk plus a crown hung at the
+  crown's height, or a stack of boughs up the trunk. The camera's pitch moves
+  the pieces: looking down, the crown sits over the tree's spot and the
+  trunk is hidden; at 45° the trunk is long. The trunk is painted at its
+  longest and cut to length in the shader, so its texels are never squashed.
+  Because a crown's depth comes from where it hangs, the taller tree is on
+  top when seen from above. Bushes hang from their middles for the same
+  reason. Grass and reeds keep one height at every pitch.
+- **Caching:** quads and shadows are kept per 16-cell chunk and rebuilt only
+  when the world has ticked, two chunks a frame. Nothing is rebuilt while
+  paused.
+- **Wind:** the shader shifts each quad's top corners by whole texels, each
+  plant on its own beat.
+
 ## One pixel grid
 
 The world is drawn into an off-screen image at half the window's logical

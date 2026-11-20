@@ -588,7 +588,7 @@ int main(int argc, char** argv) {
                 format("DRAWS %d  TRIS %d  BAKE %.2f MS  %dX%d Z%d", world_draws + batch.draw_calls(),
                        tilted ? tilt.triangles() : 0, view.bake_ms(), art_w, art_h, target.depth_bits()),
                 format("SIM %.2f MB  RSS %.1f MB", world.memory_bytes() / 1048576.0, resident_bytes() / 1048576.0),
-                format("FRONTS %zu  WIND %d  TREES %d  %s", world.fronts().size(), world.wind_speed(),
+                format("FRONTS %d  WIND %d  TREES %d  %s", int(world.fronts().size()), world.wind_speed(),
                        tilted ? tilt.trees() : 0, gl::is_es() ? "GLES" : "GL"),
             };
             font.rect(batch, 4, 4, 4 + 6 * 2 * 44 + 8, 4 + 5 * 18 + 6, panel);
@@ -618,9 +618,10 @@ int main(int argc, char** argv) {
                     sum += v;
                 }
                 std::printf("frames=%zu frame_ms_mean=%.2f frame_ms_p99=%.2f frame_ms_max=%.2f tick_ms=%.3f bake_ms=%.2f "
-                            "ticks=%" PRIu64 "\n",
+                            "ticks=%" PRIu64 " triangles=%d sprites=%d draws=%d\n",
                             sorted.size(), sum / double(sorted.size()), sorted[sorted.size() * 99 / 100], sorted.back(),
-                            tick_ms, view.bake_ms(), world.tick());
+                            tick_ms, view.bake_ms(), world.tick(), tilted ? tilt.triangles() : 0,
+                            tilted ? tilt.sprites() : 0, tilted ? tilt.draw_calls() : 0);
                 running = false;
             }
         }
