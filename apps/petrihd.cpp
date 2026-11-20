@@ -269,7 +269,9 @@ int main(int argc, char** argv) {
     // scaled up by whole pixels.
     const int art_w = width / pixel, art_h = (view_height + pixel - 1) / pixel;
     gfx::PixelTarget target;
-    if (!target.init(art_w, art_h)) {
+    const bool target_ok = target.init(art_w, art_h);
+    tilt.set_target_alpha(target.has_alpha());
+    if (!target_ok) {
         return 1;
     }
     Camera camera;
@@ -513,6 +515,16 @@ int main(int argc, char** argv) {
             }
             scene_ready = tilt.draw(world, art_camera, view.terrain(), font, art_w, art_h, art_h,
                                     shoreline_study ? study_animation : frame_start, capture);
+            // Firelight on what is around a fire, then the sky over it all:
+            // cloud shadows, fog, rain, snow and lightning.
+            batch.begin(art_w, art_h);
+            gl::BlendFunc(gl::DST_COLOR, gl::ONE);
+            view.draw_firelight(batch, world, art_camera, art_w, art_h, shoreline_study ? study_animation : frame_start);
+            batch.end();
+            tilt.draw_fire();
+            batch.begin(art_w, art_h);
+            view.draw(batch, font, world, art_camera, art_w, art_h, shoreline_study ? study_animation : frame_start, true);
+            batch.end();
         } else {
             batch.begin(art_w, art_h);
             view.draw(batch, font, world, art_camera, art_w, art_h, frame_start);

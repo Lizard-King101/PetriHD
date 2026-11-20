@@ -78,13 +78,26 @@ Tree tree_in(const phd::World& world, int cx, int cy) {
     if (cx < 0 || cy < 0 || cx >= world.width() || cy >= world.height()) {
         return tree;
     }
-    const phd::Plant* p = world.tree(std::size_t(cy) * world.width() + cx);
+    const auto cell = std::size_t(cy) * world.width() + cx;
+    const phd::Plant* p = world.tree(cell);
     if (!p) {
+        if (const int tall = world.snag(cell)) {
+            // A snag stands where its tree did: grey, leafless, with what is
+            // left of its limbs close to the trunk.
+            const auto place = world.snag_place(cell);
+            tree.x = float(cx) + 0.3f + float(place & 255) / 255.0f * 0.4f;
+            tree.y = float(cy) + 0.3f + float(place >> 8 & 255) / 255.0f * 0.4f;
+            tree.radius = float(phd::crown16(tall)) / 16.0f;
+            tree.height = float(tall) / float(phd::cell_decimetres);
+            tree.r = 104, tree.g = 92, tree.b = 82;
+            tree.bare = tree.snag = true;
+            tree.id = phd::hash3(cx, cy, place);
+        }
         return tree;
     }
     // Where in its cell the trunk stands, from the plant itself, so it
     // stays put as the camera moves and as the tree grows.
-    const auto h = phd::hash3(int(p->id), int(p->id >> 16), 0x7f4a7c15u);
+    const auto h = phd::hash3(int(p->id), int(p->id >> 16), phd::tree_place_salt);
     tree.x = float(cx) + 0.3f + float(h & 255) / 255.0f * 0.4f;
     tree.y = float(cy) + 0.3f + float(h >> 8 & 255) / 255.0f * 0.4f;
     tree.radius = float(phd::crown16(p->height)) / 16.0f;
@@ -95,6 +108,19 @@ Tree tree_in(const phd::World& world, int cx, int cy) {
     tree.b = std::uint8_t(std::min(255.0f, c.b));
     tree.conifer = phd::evergreen(p->genome) && p->genome.gene[phd::gene_cold] >= 150;
     tree.bare = !phd::evergreen(p->genome) && (p->flags & phd::plant_dormant);
+    // The crown's outline runs in the family. Trees that scatter small seeds
+    // on the wind are pioneers with loose, airy crowns, and thin-barked ones
+    // among them have white bark. Trees of dry ground spread wide and flat,
+    // trees that need full light grow narrow and tall, and the rest are round.
+    const auto& gene = p->genome.gene;
+    if (gene[phd::gene_seed] < 96 && !phd::fruiting(p->genome)) {
+        tree.form = 3;
+        tree.pale = gene[phd::gene_bark] < 110;
+    } else if (gene[phd::gene_drought] >= 150) {
+        tree.form = 1;
+    } else if (gene[phd::gene_shade] < 100) {
+        tree.form = 2;
+    }
     tree.id = p->id;
     return tree;
 }
@@ -213,11 +239,19 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                 for (int k = 0; k < near_count[here]; ++k) {
                     const Tree& t = *near[here * per_cell + k];
                     const float dx = x - t.x, dy = y - t.y;
-                    if (dx * dx + dy * dy < t.radius * t.radius && (!top || t.y > top->y)) {
+                    bool covers = dx * dx + dy * dy < t.reach() * t.reach();
+                    if (covers && t.bare) {
+                        // A leafless tree is its limbs: five spokes from the
+                        // trunk, a texel wide, with the ground between them.
+                        const float turn = std::atan2(dy, dx) * (5 / 6.2831853f) + float(t.id % 16) / 16.0f;
+                        const float off = std::fabs(turn - std::floor(turn + 0.5f)) * (6.2831853f / 5) * std::sqrt(dx * dx + dy * dy);
+                        covers = off < 0.6f * inv;
+                    }
+                    if (covers && (!top || t.y > top->y)) {
                         top = &t;
                     }
                     const float sx = dx + sun.x * t.radius * 0.9f, sy = dy + sun.y * t.radius * 0.9f;
-                    shadowed = shadowed || sx * sx + sy * sy < t.radius * t.radius * 0.85f;
+                    shadowed = shadowed || (!t.snag && sx * sx + sy * sy < t.radius * t.radius * 0.85f);
                 }
                 if (top && !flat) {
                     // Forest floor under a tree the tilted view stands up:
@@ -232,21 +266,23 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                     // The tones of its sprite, from shade to highlight.
                     c = palette::leaf_tone({float(top->r), float(top->g), float(top->b)},
                                            1.3f + 1.9f * std::max(0.0f, lit) + grain * 8);
-                    if (top->bare && (noise >> 6 & 3) != 0) {
-                        c = scale(c, 0.7f); // bare branches: the ground shows through
-                    }
-                    if ((noise >> 8 & 7) == 0) {
+                    if (top->bare) {
+                        c = (noise >> 6 & 3) == 0 ? Rgb{128, 112, 98} : Rgb{104, 92, 82}; // grey wood
+                    } else if ((noise >> 8 & 7) == 0) {
                         c = scale(c, 0.85f); // leaf clumps
                     }
                 } else if (shadowed && flat) {
                     c = scale(c, 0.68f); // the tilted view casts its own shadows
                 }
 
-                const float s = top ? sample(world, x, y, snow) : 0;
+                // Snow lies on a crown of leaves in patches, with the leaves
+                // showing between; it does not lie on bare limbs. (The
+                // ground's own snow is in its painting.)
+                const float s = top && !top->bare ? sample(world, x, y, snow) : 0;
                 if (s > 20) {
                     const float lying = std::min(1.0f, (s - 20) / 70.0f);
-                    if (float(noise >> 8 & 255) / 255.0f < lying * 1.3f) {
-                        c = mix(c, palette::snow, std::min(1.0f, lying + (top ? 0.0f : 0.3f)));
+                    if (float(noise >> 8 & 255) / 255.0f < lying * 0.6f) {
+                        c = mix(c, palette::snow, 0.75f);
                     }
                 }
                 // Burnt ground: char and ash, fading as it recovers.

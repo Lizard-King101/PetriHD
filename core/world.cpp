@@ -25,7 +25,7 @@ constexpr std::uint32_t river_min_flow = 3000;
 constexpr int lake_start_level = 700;
 
 constexpr char save_magic[4] = {'P', 'H', 'D', 'W'};
-constexpr std::uint32_t save_version = 4;
+constexpr std::uint32_t save_version = 5; // 5 added snags; a version 4 save loads with none
 
 // Little-endian serialisation of integers and arrays of them.
 struct Writer {
@@ -106,6 +106,9 @@ World::World(const WorldConfig& config)
     canopy_height_.assign(n, 0);
     canopy_cover_.assign(n, 0);
     litter_.assign(n, 0);
+    snag_height_.assign(n, 0);
+    snag_rot_.assign(n, 0);
+    snag_place_.assign(n, 0);
     fire_.assign(n, 0);
     fire_next_.assign(n, 0);
     burnt_.assign(n, 0);
@@ -304,9 +307,20 @@ void World::update_soil(int y) {
         const auto kind = Water(water_[i]);
         const int t = temperature_at(i, kind == Water::ocean || kind == Water::lake);
         temperature_[i] = static_cast<std::int16_t>(t);
+        // A snag rots: about four years standing, less where it is warm and
+        // damp, a quarter of the pace while frozen, and four times the pace
+        // standing in water (sea, lake or river), where it is down in about a year.
+        // When it falls it is litter. `pace` is its chance in 64 this pass.
+        const auto rot_snag = [&](std::uint32_t pace) {
+            if (snag_height_[i] && hash3(x, y, salt + 2) % 64 < pace && --snag_rot_[i] == 0) {
+                litter_[i] = static_cast<std::uint16_t>(std::min(65535, litter_[i] + snag_height_[i] * 2));
+                snag_height_[i] = 0;
+            }
+        };
         if (kind == Water::ocean) {
             soil_[i] = 255;
             snow_[i] = 0;
+            rot_snag(16);
             continue;
         }
         // Rain is bilinear between weather nodes, so storms have soft edges.
@@ -315,6 +329,7 @@ void World::update_soil(int y) {
             lakes_[terrain_.basin[i]].inflow += std::uint32_t(rain);
             soil_[i] = 255;
             snow_[i] = 0;
+            rot_snag(t <= 0 ? 1 : 16);
             continue;
         }
         int soil = soil_[i], snow = snow_[i];
@@ -358,6 +373,7 @@ void World::update_soil(int y) {
             litter_[i] = static_cast<std::uint16_t>(litter_[i] - rot);
             nutrients_[i] = static_cast<std::uint8_t>(std::min(255, nutrients_[i] + (rot + 3) / 4));
         }
+        rot_snag(t <= 0 ? 1u : kind == Water::river ? 16u : t > 150 && soil > 120 ? 8u : 4u);
         if (nutrients_[i] < 60 && hash3(x, y, salt + 1) % 64 == 0) {
             ++nutrients_[i];
         }
@@ -652,6 +668,9 @@ std::uint64_t World::fingerprint() const {
     }
     all(free_);
     all(litter_);
+    all(snag_height_);
+    all(snag_rot_);
+    all(snag_place_);
     all(fire_);
     all(burnt_);
     all(canopy_height_);
@@ -750,6 +769,9 @@ std::vector<std::uint8_t> World::save() const {
     w.array(burnt_);
     w.array(canopy_height_);
     w.array(canopy_cover_);
+    w.array(snag_height_);
+    w.array(snag_rot_);
+    w.array(snag_place_);
     w.put(checksum(w.out.data(), w.out.size()));
     return std::move(w.out);
 }
@@ -763,7 +785,8 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
         return false;
     }
     Reader r{data + 4, data + size - 8};
-    if (r.get<std::uint32_t>() != save_version) {
+    const auto version = r.get<std::uint32_t>();
+    if (version != save_version && version != 4) {
         return false;
     }
     WorldConfig config;
@@ -864,6 +887,11 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
     r.array(world.burnt_);
     r.array(world.canopy_height_);
     r.array(world.canopy_cover_);
+    if (version >= 5) {
+        r.array(world.snag_height_);
+        r.array(world.snag_rot_);
+        r.array(world.snag_place_);
+    }
     if (!r.ok || r.at != r.end) {
         return false;
     }

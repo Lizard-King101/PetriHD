@@ -91,6 +91,6 @@ inline Rgb leaf_tone(Rgb pigment, float t) {
 // Low growth covering the ground, from its pigment: dull at 0, sunlit at 1.
 inline Rgb turf(Rgb p, float t) { return mix(p, {p.r * 1.3f + 10, p.g * 1.18f + 6, p.b * 1.05f}, t); }
 // Grass in the shade of trees.
-inline Rgb shaded_turf(Rgb p) { return {p.r * 0.7f, p.g * 0.74f, p.b * 0.85f}; }
+inline Rgb shaded_turf(Rgb p) { return {p.r * 0.56f, p.g * 0.64f, p.b * 0.8f}; }
 
 } // namespace art::palette

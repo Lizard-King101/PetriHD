@@ -43,6 +43,7 @@ constexpr int cross_distance = 700; // genomes further apart than this can't cro
 // their canopy, but trunks stand a few metres apart, not in every cell.
 constexpr int tree_spacing = 2;
 constexpr int trees_nearby = 1;
+constexpr int snag_least_dm = 50; // a dead tree shorter than 5 m just falls
 
 } // namespace
 
@@ -52,10 +53,16 @@ bool World::room_for_tree(int cell) const {
     for (int dy = -tree_spacing; dy <= tree_spacing; ++dy) {
         for (int dx = -tree_spacing; dx <= tree_spacing; ++dx) {
             const int x = cx + dx, y = cy + dy;
-            if ((dx || dy) && x >= 0 && y >= 0 && x < w && y < h && tree(std::size_t(y) * w + x)) {
-                if (++near > trees_nearby) {
-                    return false;
-                }
+            if (x < 0 || y < 0 || x >= w || y >= h) {
+                continue;
+            }
+            // In halves: a living tree is a whole one, a snag half, the
+            // snag in this very cell included. There is room beside one
+            // tree and one snag, but not more.
+            const auto i = std::size_t(y) * w + x;
+            near += (dx || dy) && tree(i) ? 2 : snag_height_[i] ? 1 : 0;
+            if (near > trees_nearby * 2 + 1) {
+                return false;
             }
         }
     }
@@ -97,8 +104,17 @@ void World::kill_plant(std::uint32_t index) {
             occupancy_[base + std::size_t(s)] = 0;
         }
     }
-    // What it was becomes litter: fuel for fires, then nutrients.
-    const int mass = woody(p.genome) ? p.height * 4 : p.height;
+    // What it was becomes litter: fuel for fires, then nutrients. A tree of
+    // any size leaves its trunk standing as a snag, where it stood, and only
+    // its leaves and branches fall now.
+    int mass = woody(p.genome) ? p.height * 4 : p.height;
+    if (p.slot == whole_cell && p.height >= snag_least_dm) {
+        const auto c = std::size_t(p.cell);
+        snag_height_[c] = static_cast<std::uint8_t>(std::min<int>(255, p.height));
+        snag_rot_[c] = 255;
+        snag_place_[c] = static_cast<std::uint16_t>(hash3(int(p.id), int(p.id >> 16), tree_place_salt));
+        mass /= 2;
+    }
     litter_[std::size_t(p.cell)] = static_cast<std::uint16_t>(std::min(65535, litter_[std::size_t(p.cell)] + mass));
     p.id = 0;
     free_.push_back(index);
@@ -240,10 +256,13 @@ void World::grow_plant(std::uint32_t index) {
     if (t < frost) {
         damage += (frost - t) / 10 + 2;
     }
-    // Flooding: deeper than it can stand, unless it stands above the water.
+    // Flooding: its roots drown in water deeper than it can stand, however
+    // far its top is above the surface; the more so the deeper. The flood
+    // gene is its affinity for water: how deep it can stand in it.
     if (kind != Water::none) {
-        if (kind == Water::ocean || (depth_[c] > g[gene_flood] / 16 && p.height < depth_[c] + 5)) {
-            damage += 8;
+        const int over = kind == Water::ocean ? 16 : depth_[c] - g[gene_flood] / 16;
+        if (over > 0) {
+            damage += std::min(8, 2 + over);
         }
     }
 
@@ -261,14 +280,18 @@ void World::grow_plant(std::uint32_t index) {
         }
     }
     shade = std::min(shade, 245) * (320 - g[gene_shade]) / 320;
-    const int light = daylight() * (256 - shade) / 256;
+    int light = daylight() * (256 - shade) / 256;
+    if (kind != Water::none && depth_[c] > p.height) {
+        light = light * 12 / (12 + depth_[c] - p.height); // under water, dimmer the deeper
+    }
 
     // Water: the soil's, and what deep roots reach in the ground below.
     int available = soil_[c] + (moisture_[c] >> 8) * g[gene_roots] / 384;
     if (kind != Water::none) {
         available = 255;
     }
-    const int need = 30 + (255 - g[gene_drought]) / 2;
+    // A plant made for water needs wet ground when it stands on land.
+    const int need = 30 + (255 - g[gene_drought]) / 2 + (kind == Water::none ? g[gene_flood] / 4 : 0);
     const int water = std::min(256, available * 256 / need);
     if (available * 3 < need * 2) {
         damage += 1 + (need * 2 - available * 3) / 40; // wilting
@@ -320,6 +343,11 @@ void World::grow_plant(std::uint32_t index) {
                 if (clear && room_for_tree(int(c))) {
                     for (int s = 0; s < 4; ++s) {
                         occupancy_[c * 4 + std::size_t(s)] = index + 1;
+                    }
+                    if (snag_height_[c]) {
+                        // The new tree takes the old one's place: the snag comes down.
+                        litter_[c] = static_cast<std::uint16_t>(std::min(65535, litter_[c] + snag_height_[c] * 2));
+                        snag_height_[c] = 0;
                     }
                     p.slot = whole_cell;
                     room = true;
@@ -444,7 +472,7 @@ bool World::establish(const PlantGenome& genome, std::uint32_t lineage, int cell
 }
 
 int World::fuel(std::size_t i) const {
-    int mass = litter_[i] / 4;
+    int mass = litter_[i] / 4 + snag_height_[i] / 4;
     for (int s = 0; s < 4; ++s) {
         if (const Plant* p = occupant(i, s)) {
             mass += p->slot == whole_cell ? p->height / 2 : p->height * 6;
@@ -483,6 +511,9 @@ void World::update_fire() {
                 fire_next_[i] = 0;
                 continue;
             }
+            // A snag already standing burns away. (A tree this fire kills
+            // leaves a new one, charred, for the next fire.)
+            snag_height_[i] = 0;
             // Burn what is here: small plants die; trees with thick bark lose
             // their tops and live, the rest die. Fire-held seeds are released.
             for (int s = 0; s < 4; ++s) {

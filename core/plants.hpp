@@ -56,6 +56,9 @@ struct Plant {
 constexpr int whole_cell = 4;
 constexpr int small_limit_dm = 15; // taller needs the whole cell
 constexpr int passes_per_day = 15;
+// Where in its cell a tree stands comes from a hash of its id with this, so
+// the snag it leaves stands in the same place.
+constexpr std::uint32_t tree_place_salt = 0x7f4a7c15u;
 
 inline bool woody(const PlantGenome& g) { return g.gene[gene_woody] >= 128; }
 inline bool evergreen(const PlantGenome& g) { return g.gene[gene_evergreen] >= 128; }

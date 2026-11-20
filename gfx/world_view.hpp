@@ -27,8 +27,18 @@ public:
     // A capture finishes all visible work for the requested tick.
     bool refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, double budget,
                  bool tilted, bool capture = false);
+    // `over_painting` draws only the sky's part (cloud shadows, fog, rain,
+    // snow, lightning) over a ground the tilted view has drawn, at whatever
+    // pitch the camera is: cloud shadows and fog lie on the ground, taken as
+    // level with the focus, and rain and snow fall across the screen.
     void draw(Batch& batch, const Font& font, const phd::World& world, const Camera& camera, int view_w, int view_h,
-              double time);
+              double time, bool over_painting = false);
+
+    // Firelight, over the tilted view: after dark each burning cell in view
+    // lights what is around it, in steps, and fires side by side add up. It is drawn with the blend that
+    // brightens what is there (gl::DST_COLOR, gl::ONE), which the caller sets
+    // between the batch's begin and end; by day it draws nothing.
+    void draw_firelight(Batch& batch, const phd::World& world, const Camera& camera, int view_w, int view_h, double time);
 
     const Texture& terrain() const { return terrain_; }
     double bake_ms() const { return bake_ms_; }
@@ -40,7 +50,13 @@ private:
 
     // The terrain at 4 texels per cell, and averaged down to 2 and 1, so the
     // zoomed-out view samples one texel per pixel and small things don't blink.
-    Texture terrain_, terrain_half_, terrain_quarter_, clouds_, fog_;
+    Texture terrain_, terrain_half_, terrain_quarter_, clouds_, fog_, glow_;
+    // The firelight over the view: light_per_cell texels to the cell (two art
+    // pixels to the texel at 64 px per cell), in the
+    // top-left corner of a texture big enough for the widest tilted view.
+    static constexpr int light_per_cell = 8, light_size = 512;
+    std::vector<float> light_;
+    std::vector<std::uint8_t> light_rgba_;
     enum class Lighting { preview, flat, tilted };
     struct BakedChunk {
         std::uint64_t tick = 0;

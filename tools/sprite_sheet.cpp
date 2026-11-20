@@ -8,7 +8,7 @@
 
 int main(int argc, char** argv) {
     using namespace art::sprites;
-    const int width = 640, height = 560;
+    const int width = 480, height = 960;
     std::vector<std::uint8_t> rgb(std::size_t(width) * height * 3);
     for (std::size_t i = 0; i < rgb.size(); i += 3) {
         rgb[i] = 128, rgb[i + 1] = 138, rgb[i + 2] = 78;
@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
         for (int j = 0; j < image.height && shelf + j < height; ++j) {
             for (int i = 0; i < image.width; ++i) {
                 const auto* p = &image.rgba[(std::size_t(j) * image.width + i) * 4];
-                if (p[3]) {
+                if (p[3]) { // solid or glowing
                     auto* out = &rgb[(std::size_t(shelf + j) * width + x + i) * 3];
                     out[0] = p[0], out[1] = p[1], out[2] = p[2];
                 }
@@ -38,12 +38,29 @@ int main(int argc, char** argv) {
         shelf += tallest + 6;
         tallest = 0;
     };
-    // The pieces of trees: crowns, trunks, and a conifer's boughs from the hem to the tip.
-    for (int v = 0; v < 4; ++v) {
-        place({Kind::crown, 0, std::uint16_t(18 + v * 12), 70, 124, 52, 0, 0, std::uint8_t(v)});
+    // Crowns: each form at three sizes, then bare, autumn, and small ones.
+    for (int form = 0; form < 4; ++form) {
+        for (int v = 0; v < 3; ++v) {
+            place({Kind::crown, 0, std::uint16_t(22 + v * 14), std::uint8_t(form == 3 ? 112 : 80),
+                   std::uint8_t(form == 3 ? 144 : 112), std::uint8_t(form == 1 ? 80 : 48), 0, 0, std::uint8_t(v),
+                   std::uint8_t(form)});
+        }
+        row();
     }
-    place({Kind::crown, 0, 40, 112, 98, 86, bare, 0, 0});
-    place({Kind::crown, 0, 30, 180, 120, 50, 0, 0, 1});
+    for (int view = 0; view < views; ++view) {
+        place({Kind::crown, 0, 40, 112, 98, 86, bare, 0, 0, 0, std::uint8_t(view)});
+    }
+    // A snag's top, from the same three pitches.
+    for (int view = 0; view < views; ++view) {
+        place({Kind::crown, 0, 16, 104, 92, 82, std::uint8_t(bare | dead), 0, 1, 0, std::uint8_t(view)});
+    }
+    row();
+    place({Kind::crown, 0, 30, 208, 112, 48, 0, 0, 1});
+    place({Kind::crown, 0, 30, 208, 176, 48, 0, 0, 1, 3});
+    place({Kind::crown, 0, 30, 176, 48, 48, 0, 0, 1, 1});
+    place({Kind::crown, 0, 12, 80, 112, 48, 0, 0, 1});
+    place({Kind::crown, 0, 8, 80, 112, 48, 0, 0, 1, 2});
+    place({Kind::trunk, 60, 5, 0, 0, 0, pale, 0, 0});
     row();
     for (int v = 0; v < 5; ++v) {
         place({Kind::trunk, std::uint16_t(30 + v * 18), std::uint16_t(2 + v * 2), 0, 0, 0, std::uint8_t(v == 4 ? bare : 0), 0, 0});
@@ -70,6 +87,23 @@ int main(int argc, char** argv) {
     place({Kind::grass, 14, 4, 176, 158, 104, bare, 0, 0});
     for (int v = 0; v < 6; ++v) {
         place({Kind::reed, std::uint16_t(10 + v * 4), std::uint16_t(2 + v / 2), 112, 136, 60, 0, 0, std::uint8_t(v)});
+    }
+    row();
+    // Water plants: under the water, and floating on it.
+    for (int v = 0; v < 6; ++v) {
+        place({Kind::waterweed, std::uint16_t(5 + v * 3), std::uint16_t(2 + v / 2), 80, 120, 64, 0, 0, std::uint8_t(v)});
+    }
+    for (int v = 0; v < 6; ++v) {
+        place({Kind::pad, 0, std::uint16_t(3 + v / 2), 80, 136, 64, std::uint8_t(v % 2 ? flowering : 0), std::uint8_t(v),
+               std::uint8_t(v)});
+    }
+    row();
+    // Fire: a flame's four frames at two sizes, and smoke as it thins.
+    for (int v = 0; v < 8; ++v) {
+        place({Kind::flame, std::uint16_t(v < 4 ? 14 : 28), 0, 0, 0, 0, 0, 0, std::uint8_t(v % 4)});
+    }
+    for (int v = 0; v < 6; ++v) {
+        place({Kind::smoke, 0, std::uint16_t(4 + v * 2), 0, 0, 0, 0, 0, std::uint8_t(v / 2)});
     }
     const char* path = argc > 1 ? argv[1] : "sprites.png";
     if (!phd::write_png(path, width, height, rgb)) {

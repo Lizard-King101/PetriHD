@@ -97,7 +97,49 @@ sprite painted on the CPU (`gfx/plant_sprites.cpp`, no GL) as it looks from
 the three-quarter camera, at 32 texels per cell: one texel per art pixel at
 64 px per cell. A bigger plant gets more pixels, never bigger ones.
 
-![Crowns, trunks and boughs, then bushes, grasses and reeds](images/plant_sprites.png)
+![Crowns in four forms, then bare and autumn crowns, trunks, boughs, bushes, grasses and reeds](images/plant_sprites.png)
+
+- **Crowns are built from clumps of leaves.** A clump is about the same
+  size whatever the plant, so a bigger crown has more of them. Each is lit
+  on its upper left, dark beneath, and shades the clump below it; the crown
+  as a whole is lit the same way and has a dark outline underneath.
+- **Four crown forms, from the genome** (`art::tree_in`): loose and airy for
+  trees with small wind-borne seeds, with white bark if their bark is thin;
+  broad and flat-bottomed for drought-tolerant trees; narrow and tall for
+  trees that need full light; round otherwise. Bushes are always round.
+- **Conifer boughs** are sprays fanning from the trunk to a hem of points.
+- **The ground under trees** is darker and barer than open turf, so crowns
+  stand out from the meadow.
+
+![An autumn forest at 64 px per cell](images/crowns_autumn.png)
+
+- **Bare crowns are painted for the camera's pitch.** A ball of leaves looks
+  much the same from anywhere, but bare limbs do not. A leafless crown grows
+  its limbs in three dimensions, then paints them as seen at 55°, 70° and
+  90°. All three quads are in the mesh, and the sprite shader shows the one
+  nearest the camera's pitch, so the limbs fan upward from the side and
+  spread like spokes from above.
+
+![A winter forest at 36, 45, 64 and 128 px per cell](images/bare_crowns_pitch.png)
+
+- **Snags** are a grey trunk as thick as the tree's was, snapped off at the
+  top in splinters, with two or three stubs of limbs at different heights
+  below the break, in the same three views as a bare crown. That is what
+  tells one from a tree that is only bare for the winter. Whatever grows in the cell is drawn under it. In the bird's-eye
+  map a snag is a small set of grey spokes.
+
+![Snags standing in and beside a flooded shore in autumn](images/snags.png)
+
+- **Shadows are the plants' own outlines.** A tree's crown, a conifer's
+  lowest tier or a bush is laid flat on the ground from the atlas, in
+  pieces that follow the slope, and only its outline is used. A bare tree
+  casts its view from above, so its shadow is its limbs.
+- **Overlapping shadows darken the ground once.** The art target is RGBA
+  where the GPU allows. Before the shadows, the target's alpha is set to how
+  much light a shadow leaves (0.70); a shadow multiplies the ground by that
+  alpha and sets it to 1, so a second shadow on the same pixel changes
+  nothing. The alpha is set back to opaque when the frame ends. On an RGB
+  target shadows fall back to plain blending and do stack.
 
 - **Kinds:** bush, cone-shaped bush, grass and reed, and the pieces of
   trees: crown, trunk and conifer bough. Each has a leafless or withered form. Size, leaf colour, flowers and a
@@ -126,6 +168,92 @@ the three-quarter camera, at 32 texels per cell: one texel per art pixel at
   Moving away cancels an unfinished off-screen build.
 - **Wind:** the shader shifts each quad's top corners by whole texels, each
   plant on its own beat.
+- **Handover at 32 px per cell.** At 32 and below the camera is top-down and
+  the bird's-eye map is drawn; plant sprites and the painted ground show
+  only above 32, as the camera starts to tilt.
+- **In the bird's-eye map a bare tree is its limbs:** five grey spokes with
+  the ground between, and no snow lying on them.
+
+## Water (shoreline study)
+
+With `--shoreline-study` the water is a surface of its own, not part of the
+ground.
+
+![A lake shore at 128 px per cell, a river in forest, a frozen stream and the open sea](images/water_surface.png)
+
+- **The ground's mesh is the bed.** It no longer rises and falls with the
+  water, so neither does anything standing on it. A corner that touches
+  water is no higher than that water's bed, so a stream one cell wide
+  between high banks still has a channel. The ground painter leaves the
+  water out and paints the bed under it (`art::ground::paint`, `water`
+  false); it is not repainted as the water's depth changes.
+- **The water's mesh** is one quad for each wet cell and each cell around
+  one, at the water's level, rebuilt for a chunk when its water moves. Each
+  corner carries how deep the water is there: the surface less the bed.
+  Corners that touch no water are held just under the ground, so water
+  standing on a slope doesn't spill downhill.
+- **The shader** (`water_fragment_source`) finds the shore where that depth
+  reaches nothing, moved by a noise on the ground's own texels and lapping
+  in and out with time. The bed shows through the first metre in six steps
+  of opacity; deeper water is opaque and darkens with depth. There is a
+  broken pale line at the water's edge, glints that drift across, and ice
+  where it is frozen.
+- **It is drawn last, without writing depth:** over the bed, the shadows on
+  it and the legs of whatever wades, and behind everything standing clear.
+- **Plants in water** stand at its surface and show what is clear of it:
+  grass, reeds and bushes are painted that much shorter, and a tree's trunk
+  starts at the waterline.
+- **Rivers run.** Each corner of the water's mesh carries which way its
+  water goes (`Terrain::downstream`) and how fast: a river at full speed, a
+  lake slowly toward its outlet, the sea not at all. Glints are short dashes
+  carried along that way for a moment each, two sets taking turns; a river
+  has more of them, lying along its run.
+- **Water plants.** A soft plant wholly under water is a waterweed sprite
+  standing on the bed, with the water drawn over it. One with a flood gene
+  above 155 that reaches at least halfway to the surface also floats pads
+  on it, with a flower when it is in bloom.
+- Without the study the water is still painted into the terrain texture and
+  the mesh is its surface, as before.
+
+## Weather and fire, close up
+
+The tilted view has the sky's part of the bird's-eye view drawn over it
+(`WorldView::draw`, `over_painting`), and with `--shoreline-study` its fires
+are painted sprites.
+
+![Rain, snow and morning fog; lightning, a fire by day and a fire at night](images/weather_close.png)
+
+- **Cloud shadows and fog** are the same two weather textures, laid on the
+  ground as level with the focus, so they keep their place as the camera
+  tilts. Close up the fog is a veil at six tenths of its strength.
+- **Rain and snow fall across the screen.** Each of up to 280 drops has its
+  own column and falls again and again; it shows while the ground under it
+  is being rained on, more of them the harder it rains, and is a flake where
+  that ground is below freezing. Rain leans with the wind and leaves short
+  pale dashes where it lands.
+- **Lightning** flashes the view and draws its bolt from the top of the
+  screen to where it struck.
+- **Fire** is tongues of flame over each burning cell and in the crown of a
+  burning tree, four frames of flicker each, with puffs of smoke that rise,
+  lean with the wind and wear into holes as they thin; ground that has just
+  burnt smoulders here and there. They are made each frame for the cells in
+  view (`TiltView::build_fire`), from the same atlas as the plants.
+- **Flames glow.** A sprite texel with an alpha of 200 gives its own light:
+  the shader draws it as painted and doesn't dim it by the hour, so a fire
+  at night is bright against a dark forest.
+- **Firelight.** After dark the fires in view light what is around them
+  (`WorldView::draw_firelight`). A map of the light, 8 texels to the cell, is
+  built on the CPU each frame: each burning cell adds a pool that fades out
+  at 2-4 cells, pools add up to no more than full light, and the result is
+  cut into five steps that fray into each other in a checker fixed to the
+  ground. It is drawn twice with a blend that brightens what is there, so
+  the picture's own detail stays; full light takes red and green back to
+  about what day would show and leaves the blue as the night made it. Smoke
+  is drawn before the light and is lit by it; flames are drawn after
+  (`TiltView::draw_fire`), so the light doesn't wash them out. By day
+  nothing is drawn.
+
+![Firelight at midnight at 64 px per cell, and before dawn at 128](images/firelight.png)
 
 ## One pixel grid
 
@@ -194,7 +322,9 @@ cost of baking are the numbers to check there.
 
 - At 128 and 256 the ground is the 4-texel bake enlarged, so it shows as
   blocks: there is no close detail yet.
-- The tilted view draws no weather: no clouds, fog, rain or lightning.
+- Close up, cloud shadows and fog are smooth gradients from weather textures
+  at one texel to 8 cells, not pixel art. Firelight is laid over the screen,
+  so it lights a crown as if it stood on the ground behind it.
 - Water is opaque and flat, with no shallows seen through, no waves and no
   flow.
 - Relief is gentle at the default scale. `--relief 0.02` gives taller

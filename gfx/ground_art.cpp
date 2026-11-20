@@ -182,7 +182,7 @@ struct Ground {
 // The ground at one texel (tx, ty at 32 to the cell): soil, low growth, the
 // wet margin, the waterline and the water. Every view's ground comes from
 // here; the bird's-eye bake asks for one texel in eight each way.
-Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n) {
+Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n, bool with_water = true) {
     const float x = (float(tx) + 0.5f) / tpc, y = (float(ty) + 0.5f) / tpc;
     // The shoreline and the edges of growth wander, so cells don't show.
     const float warp = (n.warp_fine - 0.5f) * 0.16f + (n.warp_broad - 0.5f) * 0.22f;
@@ -194,17 +194,18 @@ Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n) {
     const float broad = n.broad, mottling = n.mottling, grain = n.grain;
     float lush = std::clamp((cover * 0.9f + broad * 0.62f + mottling * 0.25f - wet * 1.85f - 0.37f) * 1.35f, 0.0f, 1.0f);
     lush *= std::clamp(grown * 5, 0.0f, 1.0f); // nothing green where nothing grows
+    lush *= 1 - 0.5f * std::clamp((canopy - 0.25f) * 1.6f, 0.0f, 1.0f); // and less in deep shade
     const float pool = depth + (broad - 0.5f) * 1.1f + (mottling - 0.5f) * 0.7f; // decimetres
 
     // Soil: its substrate, lighter and darker in drifts, darker when damp.
     const Rgb earth = Cells::blend(cells.soil, warped);
     Rgb soil = mix(palette::scale(earth, 1.18f), palette::scale(earth, 0.85f), (broad * 0.6f + mottling * 0.4f) * 1.3f);
     soil = palette::scale(soil, 1.0f - Cells::blend(cells.damp, straight) * 0.3f);
-    soil = mix(soil, palette::litter, std::clamp(canopy - 0.55f, 0.0f, 0.4f));
+    soil = mix(soil, palette::litter, std::clamp((canopy - 0.25f) * 1.2f, 0.0f, 0.75f));
     // Low growth, in the colour of the plants that stand here.
     Rgb pigment = Cells::blend(cells.pigment, warped);
     pigment = grown > 0.02f ? palette::scale(pigment, 1 / grown) : floor_pigment;
-    Rgb turf = palette::turf(pigment, broad * 0.72f + mottling * 0.28f);
+    Rgb turf = palette::turf(pigment, 0.3f + broad * 0.55f + mottling * 0.25f);
     turf = mix(turf, palette::shaded_turf(pigment), canopy * 0.88f);
     Rgb land = mix(soil, turf, lush);
     land = mix(land, mix(palette::damp_soil, palette::scale(earth, 0.8f), 0.4f), std::clamp((wet - 0.09f) * 3.6f, 0.0f, 0.76f));
@@ -230,8 +231,11 @@ Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n) {
         water = mix(water, palette::ice, grain > 0.9f ? 0.6f : 0.85f);
     }
     const float edge = wet - 0.34f;
+    if (!with_water) {
+        water = bed; // the water itself is drawn over this
+    }
     Rgb color = mix(land, water, edge * 8.0f);
-    if (edge > 0.015f && edge < 0.052f && mottling > 0.43f) {
+    if (with_water && edge > 0.015f && edge < 0.052f && mottling > 0.43f) {
         color = mix(color, palette::waterline, 0.47f);
     }
     const float grain_strength = 0.09f - 0.055f * std::clamp(pool / 12.0f, 0.0f, 1.0f);
@@ -239,12 +243,12 @@ Ground ground_at(const Cells& cells, int tx, int ty, const Noise& n) {
             std::max(wet, std::clamp(pool / 8.0f, 0.0f, 2.0f)), lush, edge > 0.06f};
 }
 
-void paint_ground(Patch& patch, const Cells& cells) {
+void paint_ground(Patch& patch, const Cells& cells, bool with_water) {
     const auto layer = [&](int k) { return Layer(patch.tx0, patch.ty0, patch.w, patch.h, periods[k], salts[k]); };
     const Layer layers[5] = {layer(0), layer(1), layer(2), layer(3), layer(4)};
     for (int ty = patch.ty0; ty < patch.ty0 + patch.h; ++ty) {
         for (int tx = patch.tx0; tx < patch.tx0 + patch.w; ++tx) {
-            const Ground g = ground_at(cells, tx, ty, {layers[0](tx, ty), layers[1](tx, ty), layers[2](tx, ty), layers[3](tx, ty), layers[4](tx, ty)});
+            const Ground g = ground_at(cells, tx, ty, {layers[0](tx, ty), layers[1](tx, ty), layers[2](tx, ty), layers[3](tx, ty), layers[4](tx, ty)}, with_water);
             const auto at = patch.index(tx, ty);
             patch.ground[at] = g.color;
             patch.dampness[at] = g.dampness;
@@ -273,7 +277,7 @@ void paint_pebble(Patch& patch, int x, int y, Rgb base, float wet, std::uint32_t
 // Blades of grass on turf, pebbles on bare and wet ground, glints on water.
 // Each is placed by the world's own texel grid, so neighbouring regions
 // agree about the ones they share.
-void paint_details(Patch& patch) {
+void paint_details(Patch& patch, bool with_water) {
     patch.picture = patch.ground;
     const int gx0 = phd::floor_div(patch.tx0, 4) * 4 + 3, gy0 = phd::floor_div(patch.ty0, 4) * 4 + 3;
     for (int y = gy0; y + 4 < patch.ty0 + patch.h; y += 4) {
@@ -305,7 +309,7 @@ void paint_details(Patch& patch) {
                                                : std::max(1.0f, (cluster - 0.45f) * 52.0f);
             if (wet < 1.5f && float((hash >> 10) & 255) < pebbles) {
                 paint_pebble(patch, ax, ay, base, wet, hash);
-            } else if (wet > 0.6f && ((hash >> 8) & 511) < (wet > 1.3f ? 3u : 6u)) {
+            } else if (with_water && wet > 0.6f && ((hash >> 8) & 511) < (wet > 1.3f ? 3u : 6u)) {
                 const int length = 2 + int((hash >> 22) & 7);
                 for (int k = 0; k < length; ++k) {
                     patch.put(ax + k, ay + int(k > 3), light(base, 0.1f + 0.045f * float(k < length / 2)));
@@ -317,14 +321,14 @@ void paint_details(Patch& patch) {
 
 } // namespace
 
-void paint(const phd::World& world, int tx0, int ty0, int w, int h, std::uint8_t* rgba, int stride) {
+void paint(const phd::World& world, int tx0, int ty0, int w, int h, std::uint8_t* rgba, int stride, bool water) {
     Patch patch(tx0 - margin, ty0 - margin, w + 2 * margin, h + 2 * margin);
     // The cells under it, and one more each way for blending and the warp.
     const int cx0 = phd::floor_div(patch.tx0, tpc) - 2, cy0 = phd::floor_div(patch.ty0, tpc) - 2;
     const int cx1 = phd::floor_div(patch.tx0 + patch.w - 1, tpc) + 2, cy1 = phd::floor_div(patch.ty0 + patch.h - 1, tpc) + 2;
     const Cells cells(world, cx0, cy0, cx1 - cx0 + 1, cy1 - cy0 + 1);
-    paint_ground(patch, cells);
-    paint_details(patch);
+    paint_ground(patch, cells, water);
+    paint_details(patch, water);
     const auto byte = [](float v) { return std::uint8_t(std::clamp(v, 0.0f, 255.0f)); };
     for (int y = 0; y < h; ++y) {
         auto* out = rgba + std::size_t(y) * std::size_t(stride);
@@ -358,13 +362,13 @@ void sample(const phd::World& world, int tx0, int ty0, int w, int h, int per_cel
     }
 }
 
-std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h) {
+std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h, bool water) {
     std::uint32_t sum = std::uint32_t(world.season()) + 1;
     for (int cy = std::max(0, cy0 - 1); cy < std::min(world.height(), cy0 + h + 1); ++cy) {
         for (int cx = std::max(0, cx0 - 1); cx < std::min(world.width(), cx0 + w + 1); ++cx) {
             const auto cell = std::size_t(cy) * world.width() + cx;
             // Each is taken as coarsely as the painting shows it.
-            std::uint32_t v = std::uint32_t(world.water(cell)) | std::uint32_t(world.water_depth_dm(cell)) << 3;
+            std::uint32_t v = std::uint32_t(world.water(cell)) | std::uint32_t(water ? world.water_depth_dm(cell) : 0) << 3;
             v = v * 31 + std::uint32_t(world.snow(cell) / 10);
             v = v * 31 + std::uint32_t(world.burnt(cell) / 24);
             v = v * 31 + std::uint32_t(world.canopy_cover(cell) / 32);

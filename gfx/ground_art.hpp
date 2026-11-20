@@ -17,7 +17,9 @@ constexpr int texels_per_cell = 32;
 
 // Paints the texels [tx0, tx0 + w) x [ty0, ty0 + h) as opaque RGBA,
 // with rows `stride` bytes apart.
-void paint(const phd::World& world, int tx0, int ty0, int w, int h, std::uint8_t* rgba, int stride);
+// With `water` false the water is left out: its bed is painted, for a view
+// that draws the water over it as a surface of its own.
+void paint(const phd::World& world, int tx0, int ty0, int w, int h, std::uint8_t* rgba, int stride, bool water = true);
 
 // The same ground at `per_cell` texels to the cell (a divisor of 32), one
 // texel of the painting for each: the bird's-eye bake draws its ground from
@@ -27,6 +29,7 @@ void sample(const phd::World& world, int tx0, int ty0, int w, int h, int per_cel
 
 // A number that changes when the picture of these cells would: water, what
 // grows, snow, fire, the season. Compare it to know when to paint again.
-std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h);
+// With `water` false, how deep the water is doesn't count: only where it is.
+std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h, bool water = true);
 
 } // namespace art::ground

@@ -30,13 +30,35 @@ enum class Kind : std::uint8_t {
     cone_bush,
     grass,
     reed,
+    waterweed, // a plant growing under water, standing on the bed
+    pad,       // its leaves floating on the surface, seen at the camera's angle
+    flame,     // one tongue of a fire; the variant is the frame of its flicker. It glows: see Image
+    smoke,     // a puff; the variant is how thin it has grown
 };
 
 enum State : std::uint8_t {
     bare = 1,      // leafless wood, or withered grass
     flowering = 2,
     tip = 4,       // a conifer's topmost bough, drawn to a point
+    pale = 8,      // white bark with dark scars, as a birch has
+    dead = 16,     // a snag's top: the trunk broken off in splinters, and stubs of limbs below it
 };
+
+// The outline of a broadleaf crown.
+enum class Form : std::uint8_t {
+    round,     // a ball of leaves
+    spreading, // broad, with a flat underside
+    columnar,  // narrow and tall
+    open,      // loose clumps with limbs showing between them
+};
+
+// Bare branches look quite different from the side and from above, so a
+// leafless crown is painted for each of these camera pitches, in degrees,
+// and the renderer shows the nearest. (A ball of leaves looks much the same
+// from anywhere, so leafy crowns have one picture.)
+constexpr int views = 3;
+constexpr float view_pitch[views] = {55, 70, 90};
+inline int view_for(float pitch_degrees) { return pitch_degrees < 62.5f ? 0 : pitch_degrees < 80 ? 1 : 2; }
 
 // What a sprite looks like. Plants are quantised to a spec, so similar
 // plants share a sprite.
@@ -48,6 +70,8 @@ struct Spec {
     std::uint8_t state = 0;
     std::uint8_t flower = 0;  // petal colour, 0-5
     std::uint8_t variant = 0; // a different shape for the same numbers
+    std::uint8_t form = 0;    // a crown's Form
+    std::uint8_t view = 0;    // bare crowns only: which of `view_pitch` it is painted for
 
     std::uint64_t key() const;
 };
@@ -56,8 +80,11 @@ struct Image {
     int width = 0, height = 0;
     int anchor_x = 0; // the column that stands on the plant's spot
     int anchor_y = 0; // rows above the bottom row: 0 for what stands on the ground, a crown's middle
+    // Alpha is 0 for clear and 255 for solid. 200 marks a texel that glows
+    // with its own light: it is drawn as painted, whatever the time of day.
     std::vector<std::uint8_t> rgba;
 };
+constexpr std::uint8_t glow_alpha = 200;
 
 Image paint(const Spec& spec);
 

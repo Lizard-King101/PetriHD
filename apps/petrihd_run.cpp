@@ -81,9 +81,13 @@ void census(const phd::World& world, double tick_us, bool biomes) {
     const auto mean = [&](int band, int trait) {
         return trait_n[band] ? double(trait_sum[band][trait]) / double(trait_n[band]) : 0.0;
     };
-    std::printf("  plants=%zu trees=%zu tree_height_m=%.1f forest_pct=%.1f burning=%zu burnt=%zu"
+    std::size_t snags = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        snags += world.snag(i) > 0;
+    }
+    std::printf("  plants=%zu trees=%zu snags=%zu tree_height_m=%.1f forest_pct=%.1f burning=%zu burnt=%zu"
                 " drought(dry/wet/water)=%.0f/%.0f/%.0f roots=%.0f/%.0f/%.0f flood=%.0f/%.0f/%.0f\n",
-                small + trees, trees, trees ? double(tree_height) / double(trees) / 10.0 : 0.0,
+                small + trees, trees, snags, trees ? double(tree_height) / double(trees) / 10.0 : 0.0,
                 land ? 100.0 * double(forest) / double(land) : 0.0, burning, burnt, mean(0, 0), mean(1, 0), mean(2, 0),
                 mean(0, 1), mean(1, 1), mean(2, 1), mean(0, 2), mean(1, 2), mean(2, 2));
     if (biomes) {

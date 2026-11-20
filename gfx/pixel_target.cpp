@@ -6,7 +6,6 @@
 namespace gfx {
 
 bool PixelTarget::init(int width, int height) {
-    texture_ = make_texture(width, height, gl::RGB, nullptr);
     gl::GenFramebuffers(1, &framebuffer_);
     gl::GenRenderbuffers(1, &depth_);
     const auto* extensions = reinterpret_cast<const char*>(gl::GetString(gl::EXTENSIONS));
@@ -15,9 +14,17 @@ bool PixelTarget::init(int width, int height) {
     gl::RenderbufferStorage(gl::RENDERBUFFER, deep ? gl::DEPTH_COMPONENT24 : gl::DEPTH_COMPONENT16, width, height);
     depth_bits_ = deep ? 24 : 16;
     gl::BindFramebuffer(gl::FRAMEBUFFER, framebuffer_);
-    gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, texture_.id, 0);
     gl::FramebufferRenderbuffer(gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, depth_);
-    const bool ok = gl::CheckFramebufferStatus(gl::FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
+    bool ok = false;
+    for (const gl::GLenum format : {gl::RGBA, gl::RGB}) {
+        texture_ = make_texture(width, height, format, nullptr);
+        gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, texture_.id, 0);
+        ok = gl::CheckFramebufferStatus(gl::FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
+        has_alpha_ = ok && format == gl::RGBA;
+        if (ok) {
+            break;
+        }
+    }
     gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
     if (!ok) {
         std::fprintf(stderr, "the pixel target's framebuffer is incomplete\n");
@@ -33,6 +40,13 @@ void PixelTarget::begin() {
 }
 
 void PixelTarget::end(int drawable_w, int drawable_h) {
+    if (has_alpha_) {
+        // Whatever was blended in, the finished image is opaque.
+        gl::ColorMask(0, 0, 0, 1);
+        gl::ClearColor(0, 0, 0, 1);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+        gl::ColorMask(1, 1, 1, 1);
+    }
     gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
     gl::Viewport(0, 0, drawable_w, drawable_h);
 }

@@ -34,6 +34,9 @@ public:
     explicit TiltView(float cells_per_metre = 10.0f / float(phd::cell_decimetres), bool shoreline_study = false)
         : relief_(cells_per_metre), shoreline_study_(shoreline_study) {}
 
+    // Whether the image being drawn into has an alpha channel: shadows use it
+    // so that overlapping ones darken the ground once.
+    void set_target_alpha(bool has) { target_alpha_ = has; }
     bool init(const phd::World& world);
     void refresh(const phd::World& world, int chunks); // re-height this many chunks
     // The display height of the ground at a point, in cells.
@@ -73,12 +76,18 @@ private:
         std::uint64_t built_tick = 0;
         int built_atlas = -1;
         bool stale = false; // the world's heights have moved on from its mesh
+        // The water over it, as a surface of its own (the painted study only).
+        gl::GLuint water_vbo = 0;
+        int water_vertices = 0;
+        float water_top = -1e9f; // the highest its water stands
+        bool water_stale = true;
         bool plants_moved = false; // the plants' ground mesh has changed
     };
     struct SpriteVertex {
         float x, y, z;      // where the plant stands
         float ox, oy, u, v; // this corner's offset in texels, and its place in the atlas
-        Color sway;         // r: how far the corner sways; g: the plant's beat; b: set on a trunk's top corners
+        Color sway;         // r: how far the corner sways; g: the plant's beat; b: set on a trunk's top corners;
+                            // a: 0, or one more than the only view (art::sprites::view_for) it is shown in
     };
     struct PlantMesh {
         std::vector<SpriteVertex> sprites;
@@ -104,13 +113,20 @@ private:
     };
 
     void build_heights(const phd::World& world);
+    void build_water(Chunk& chunk);
+    float water_corner(int x, int y) const;
+    // The water's surface over a point, or `dry`; and how deep it stands there.
+    float water_level(float x, float y) const;
+    float wading(float x, float y) const { return std::max(0.0f, water_level(x, y) - ground(x, y)); }
+    void draw_water(const phd::World& world, const Camera& camera, int screen_w, int screen_h, int view_h, double time);
     void build_chunk(Chunk& chunk);
     const Sprite* sprite(const art::sprites::Spec& spec);
     void reset_atlas();
     void add_sprite(PlantMesh& mesh, const Sprite& sprite, float x, float y, float z, float sway, std::uint32_t id,
-                    Stand stand = Stand::rooted, float lift = 0, int below = 0);
-    void add_tree(PlantMesh& mesh, float x, float y, float height, float radius, bool conifer, bool leafless, std::uint8_t r,
-                  std::uint8_t g, std::uint8_t b, std::uint32_t id);
+                    Stand stand = Stand::rooted, float lift = 0, int below = 0, std::uint8_t view = 0);
+    // Returns the piece that casts the tree's shadow.
+    const Sprite* add_tree(PlantMesh& mesh, float x, float y, float height, float radius, bool conifer, bool leafless, std::uint8_t r,
+                  std::uint8_t g, std::uint8_t b, std::uint32_t id, std::uint8_t form = 0, bool pale_bark = false, float wade = 0, float limbs = 1);
     bool allocate(int w, int h, int& x, int& y);
     void build_plant_row(const phd::World& world, int cy, int x0, int x1);
     bool update_plants(const phd::World& world, const Camera& camera, bool capture);
@@ -121,6 +137,9 @@ private:
 
     float relief_;
     bool shoreline_study_;
+    bool target_alpha_ = false;
+    gl::GLuint shadow_program_ = 0;
+    gl::GLint h_focus_ = -1, h_trig_ = -1, h_zoom_ = -1, h_screen_ = -1, h_depth_ = -1, h_alpha_ = -1;
 
     // The painted ground of the close view (ground_art.hpp), kept around the
     // camera in a wrapping 64-cell window. A small texture says which
@@ -147,6 +166,17 @@ private:
     // falls, and meshes catch up a few a frame: whatever stands on the ground
     // stands on this, the ground as drawn, or it would float until then.
     std::vector<float> drawn_;
+    // The painted study keeps the ground and the water apart: the ground's
+    // mesh is the bed, and these are the water's surface at each corner that
+    // touches water (`dry` elsewhere), and whether it is frozen there.
+    static constexpr float dry = -1e9f;
+    std::vector<float> water_;
+    std::vector<std::uint8_t> ice_;
+    std::vector<std::int8_t> flow_x_, flow_y_; // which way it runs and how fast, in 127ths
+    std::vector<Chunk*> visible_;
+    gl::GLuint water_program_ = 0;
+    gl::GLint w_focus_ = -1, w_trig_ = -1, w_zoom_ = -1, w_screen_ = -1, w_depth_ = -1, w_tint_ = -1, w_time_ = -1, w_origin_ = -1;
+    Texture ripples_;
     std::vector<Chunk> chunks_;
     std::vector<Vertex> scratch_;
     std::vector<std::uint16_t> index_scratch_;
@@ -166,6 +196,14 @@ private:
     std::unordered_map<std::uint64_t, Sprite> sprite_cache_; // by spec, stand-ins included
     std::vector<Sprite> painted_;                            // the sprites really in the atlas
     PlantMesh plant_mesh_, scene_plants_;
+    PlantMesh fire_mesh_, smoke_mesh_; // flames, and smoke, made anew each frame
+    void build_fire(const phd::World& world, const Camera& camera, int screen_w, int view_h, double time);
+public:
+    // The flames, after `draw` and after whatever light the caller has laid
+    // over the scene, so the fire's own light doesn't wash them out. (Smoke is
+    // drawn with the plants, and is lit like them.)
+    void draw_fire();
+private:
     int scene_tree_atlas_ = -1;
     Chunk* building_ = nullptr;
     int next_plant_cell_ = 0;
@@ -173,7 +211,7 @@ private:
     art::Sun plant_sun_{};
     std::vector<Chunk*> plant_chunks_;
     gl::GLuint sprite_program_ = 0, scene_sprite_vbo_ = 0;
-    gl::GLint s_focus_ = -1, s_trig_ = -1, s_zoom_ = -1, s_screen_ = -1, s_depth_ = -1, s_tint_ = -1, s_wind_ = -1, s_texel_ = -1;
+    gl::GLint s_focus_ = -1, s_trig_ = -1, s_zoom_ = -1, s_screen_ = -1, s_depth_ = -1, s_tint_ = -1, s_wind_ = -1, s_texel_ = -1, s_view_ = -1;
     float white_u_ = 0, white_v_ = 0;
     int sprites_drawn_ = 0;
 

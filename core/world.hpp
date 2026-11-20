@@ -121,6 +121,14 @@ public:
     int canopy_height(std::size_t i) const { return canopy_height_[i]; } // dm, of the crowns over a cell
     int canopy_cover(std::size_t i) const { return canopy_cover_[i]; }   // 0..255
     int litter(std::size_t i) const { return litter_[i]; }
+    // A snag: the dead trunk a tree leaves standing where it died, of
+    // whatever cause. It takes no light or water, and other plants grow
+    // under it, but it counts as half a tree when a new one looks for room.
+    // It rots over a few years, losing its top as it goes, and a fire clears
+    // it. Its height now in dm, 0 for none; and where in its cell it stands,
+    // which is where the tree stood.
+    int snag(std::size_t i) const { return snag_height_[i] * (128 + snag_rot_[i] / 2) / 255; }
+    std::uint32_t snag_place(std::size_t i) const { return snag_place_[i]; }
     int fire(std::size_t i) const { return fire_[i]; }   // burning: intensity; 0 not
     int burnt(std::size_t i) const { return burnt_[i]; } // 255 just burnt, fading
     // Sets a cell alight if there is anything to burn; for lightning and tests.
@@ -193,6 +201,9 @@ private:
     std::vector<std::uint16_t> canopy_height_;
     std::vector<std::uint8_t> canopy_cover_;
     std::vector<std::uint16_t> litter_;      // dead plant matter: fuel, then nutrients
+    std::vector<std::uint8_t> snag_height_;  // dm when the tree died, to 25.5 m; 0 for none
+    std::vector<std::uint8_t> snag_rot_;     // 255 when it died, down to 0 when it falls
+    std::vector<std::uint16_t> snag_place_;
     std::vector<std::uint8_t> fire_;
     std::vector<std::uint8_t> fire_next_;    // scratch
     std::vector<std::uint8_t> burnt_;

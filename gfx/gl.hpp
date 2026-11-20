@@ -23,7 +23,7 @@ constexpr GLenum TRIANGLES = 0x0004;
 constexpr GLenum LESS = 0x0201, LEQUAL = 0x0203;
 constexpr GLenum DEPTH_TEST = 0x0B71;
 constexpr GLbitfield DEPTH_BUFFER_BIT = 0x0100;
-constexpr GLenum SRC_ALPHA = 0x0302, ONE_MINUS_SRC_ALPHA = 0x0303;
+constexpr GLenum ZERO = 0, ONE = 1, SRC_ALPHA = 0x0302, ONE_MINUS_SRC_ALPHA = 0x0303, DST_ALPHA = 0x0304, DST_COLOR = 0x0306;
 constexpr GLenum BLEND = 0x0BE2;
 constexpr GLenum UNPACK_ALIGNMENT = 0x0CF5, PACK_ALIGNMENT = 0x0D05;
 constexpr GLenum TEXTURE_2D = 0x0DE1;
@@ -58,6 +58,8 @@ constexpr GLenum DEPTH_COMPONENT16 = 0x81A5, DEPTH_COMPONENT24 = 0x81A6, FRAMEBU
     X(void, RenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei))                         \
     X(void, BindTexture, (GLenum, GLuint))                                                   \
     X(void, BlendFunc, (GLenum, GLenum))                                                     \
+    X(void, BlendFuncSeparate, (GLenum, GLenum, GLenum, GLenum))                             \
+    X(void, ColorMask, (GLboolean, GLboolean, GLboolean, GLboolean))                         \
     X(void, BufferData, (GLenum, GLsizeiptr, const void*, GLenum))                           \
     X(void, Clear, (GLbitfield))                                                             \
     X(void, ClearColor, (GLfloat, GLfloat, GLfloat, GLfloat))                                \
