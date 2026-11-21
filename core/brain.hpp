@@ -57,6 +57,10 @@ enum SelfInput : std::uint8_t {
     heard_kin,   // how like its own voice the call's pitch is
     heard_ahead, // where the call is, if it is in a voice like its own
     heard_right,
+    self_mouth_size, // length of the animal within striking reach minus its own
+    self_pain,       // strength of the most recent hit, fading with time
+    pain_ahead,      // bearing of the hit relative to its current heading
+    pain_right,
     self_inputs
 };
 
@@ -74,6 +78,7 @@ enum Output : std::uint8_t {
     out_memory0,
     out_memory1,
     out_memory2,
+    out_attack,
     outputs
 };
 
@@ -98,7 +103,7 @@ constexpr int self_input(int which) { return sectors * sector_inputs + which; }
 struct Decision {
     std::int8_t turn = 0;   // binary angles a tick
     std::uint8_t pace = 0;
-    bool eat = false, mate = false, fly = false, call = false;
+    bool eat = false, mate = false, fly = false, call = false, attack = false;
     std::int8_t memory[memories] = {};
     std::int8_t unit[hidden] = {};  // what each hidden unit said, for looking at
     std::int8_t out[outputs] = {};  // and each output
@@ -121,6 +126,6 @@ void shuffle(Brain& brain, std::uint32_t& state);
 
 // The founders' brain: a handful of reflexes wired by hand, and the rest of
 // the network left blank for evolution to use.
-Brain founder();
+Brain founder(bool hunts = false);
 
 } // namespace phd::brain

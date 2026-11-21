@@ -9,6 +9,7 @@
 //           [--pixel N]                (screen pixels per art pixel, default 2)
 //           [--shoreline-study]        (open the spring shoreline art study)
 //           [--dev-map]                (a small hand-laid world, drawn the painted way)
+//           [--brains MODE]            (evolving, frozen, shuffled or neutral)
 //           [--phase SECONDS]          (how far into the study's animation a shot is taken)
 //
 // Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
@@ -176,6 +177,7 @@ int main(int argc, char** argv) {
     bool shoreline_study = false, dev_map = false;
     std::uint32_t inspect_id = 0; // an animal to open the inspector on, and follow
     int animals = -1; // founders to put into a new world; by default, some on the development map
+    std::optional<phd::BrainMode> brains;
     double start_phase = 1.0; // seconds into the study's animation: the pose a shot is taken in
     int bench_frames = 0;
     std::optional<int> start_speed;
@@ -207,6 +209,12 @@ int main(int argc, char** argv) {
             inspect_id = std::uint32_t(std::atoi(argv[++i]));
         } else if (arg == "--animals" && more) {
             animals = std::atoi(argv[++i]);
+        } else if (arg == "--brains" && more) {
+            brains = phd::parse_brain_mode(argv[++i]);
+            if (!brains) {
+                std::fprintf(stderr, "unknown brain mode '%s' (expected evolving, frozen, shuffled or neutral)\n", argv[i]);
+                return 2;
+            }
         } else if (arg == "--at" && more && std::sscanf(argv[++i], "%f,%f", &at_x, &at_y) == 2) {
         } else if (arg == "--pixel" && more) {
             pixel = std::clamp(std::atoi(argv[++i]), 1, 8);
@@ -227,7 +235,7 @@ int main(int argc, char** argv) {
             quit_after_shot = true;
         } else {
             std::fprintf(stderr, "usage: %s [--seed N] [--size WxH] [--load FILE] [--shot FILE.png] "
-                                 "[--frames N --speed 0-3] [--shoreline-study] [--dev-map]\n", argv[0]);
+                                 "[--frames N --speed 0-3] [--shoreline-study] [--dev-map] [--brains MODE]\n", argv[0]);
             return 2;
         }
     }
@@ -268,9 +276,10 @@ int main(int argc, char** argv) {
         }
     }
     // Founders, for a world that has no animals yet.
-    if (world.animals().empty() && (animals > 0 || (animals < 0 && dev_map))) {
+    if (world.animals().empty() && (animals > 0 || (animals < 0 && dev_map && !world.has_had_animals()))) {
         world.seed_animals(animals > 0 ? animals : 48);
     }
+    if (brains) world.set_brain_mode(*brains);
     const long long initial_ticks = skip_ticks.value_or(shoreline_study && load.empty() ? 120 : 0);
     for (long long t = 0; t < initial_ticks; ++t) {
         world.step();
@@ -656,6 +665,14 @@ int main(int argc, char** argv) {
             // is paler, and has no dark rim.
             const float light = 0.45f + 0.55f * float(world.daylight()) / 255.0f;
             const float grid = float(pixel);
+            for (const auto& c : world.carcasses()) {
+                if (!c.energy) continue;
+                float sx, sy;
+                camera.to_screen(float(c.x) / 256, float(c.y) / 256, camera.focus_z, float(width), float(view_height), sx, sy);
+                if (sx < 0 || sy < 0 || sx >= width || sy >= view_height) continue;
+                sx = std::floor(sx / grid) * grid, sy = std::floor(sy / grid) * grid;
+                font.rect(batch, sx - grid, sy, sx + grid, sy + grid, {184, 166, 132, 255});
+            }
             for (const phd::Animal& a : world.animals()) {
                 float sx, sy;
                 animal_on_screen(a, sx, sy);
@@ -782,7 +799,8 @@ int main(int argc, char** argv) {
             bar("BREATH", a->breath, phd::breath_ticks, {96, 168, 204, 255});
 
             const auto medium = phd::Medium(a->medium);
-            const char* doing = a->eating < 4 ? "GRAZING" : medium == phd::Medium::air ? "FLYING" : medium == phd::Medium::water ? "SWIMMING"
+            const char* doing = a->pain ? "HURT" : (a->wants & phd::wants_attack) ? "STRIKING"
+                                : a->eating < 4 ? "FEEDING" : medium == phd::Medium::air ? "FLYING" : medium == phd::Medium::water ? "SWIMMING"
                                 : a->pace == 0 ? "RESTING" : "WALKING";
             const auto speed = [](int v) { return double(v) * phd::cell_decimetres / 256.0; }; // m a second
             std::vector<std::string> lines = {
@@ -798,7 +816,10 @@ int main(int argc, char** argv) {
             }
             lines.push_back(std::string(f.breathes_air && f.breathes_water ? "LUNGS AND GILLS" : f.breathes_air ? "LUNGS" : "GILLS") +
                             (f.fin ? "  FINS" : ""));
-            lines.push_back(a->genome.gene[phd::agene_plant_gut] >= 32 ? "EATS PLANTS" : "EATS NOTHING YET");
+            const bool grazes = a->genome.gene[phd::agene_plant_gut] >= 32;
+            const bool eats_meat = a->genome.gene[phd::agene_meat_gut] >= 32;
+            lines.push_back(grazes ? (eats_meat ? "EATS PLANTS AND MEAT" : "EATS PLANTS")
+                                   : (eats_meat ? "EATS MEAT" : "NO DIGESTIVE GUT"));
             lines.push_back(format("LAND %.1f WATER %.1f", speed(f.land_speed), speed(f.water_speed)));
             if (f.air_speed) {
                 lines.push_back(format("AIR %.1f M/S", speed(f.air_speed)));

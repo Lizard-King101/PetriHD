@@ -28,7 +28,7 @@ struct Basin {
 // north-east, a meadow in the middle with a pad that is one even plane, a wood in
 // the west, a lake in the east with a wide shallow shelf, a stream into it
 // and out to the sea, and a beach and the sea along the south.
-enum class Layout : std::uint32_t { valley, development };
+enum class Layout : std::uint32_t { valley, development, training_pond };
 
 // The parts of the development map, for what is planted where.
 enum class Zone : std::uint8_t { open, wood, meadow, pad };
@@ -54,7 +54,7 @@ struct Terrain {
     std::vector<std::uint8_t> slope;      // dm per cell, the steepest fall
 
     // ocean_percent of the cells end up below sea level.
-    void generate(std::uint32_t seed, int width, int height, int ocean_percent, Layout layout = Layout::valley);
+    void generate(std::uint32_t seed, int width, int height, int ocean_percent, Layout layout = Layout::valley, int pond_depth_dm = 20);
 
 private:
     void flood();

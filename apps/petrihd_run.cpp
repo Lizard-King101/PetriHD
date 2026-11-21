@@ -2,6 +2,7 @@
 // prints a census line of key=value pairs every so often.
 //
 //   petrihd-run seed=1 ticks=3840 every=480 [ocean=20] [climate=90] [seasons=140] [biomes=1]
+//               [layout=development] [animals=56] [brains=evolving|frozen|shuffled|neutral]
 //               [load=in.phdw] [save=out.phdw] [png=out.png]
 
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 
 #include "file.hpp"
@@ -18,7 +20,7 @@
 
 namespace {
 
-void census(const phd::World& world, double tick_us, bool biomes) {
+void census(const phd::World& world, double tick_us, bool biomes, bool report_animals) {
     const auto n = world.cells();
     std::size_t ocean = 0, lake = 0, river = 0, snow = 0, land = 0;
     std::int64_t temperature = 0, soil = 0;
@@ -90,20 +92,31 @@ void census(const phd::World& world, double tick_us, bool biomes) {
                 small + trees, trees, snags, trees ? double(tree_height) / double(trees) / 10.0 : 0.0,
                 land ? 100.0 * double(forest) / double(land) : 0.0, burning, burnt, mean(0, 0), mean(1, 0), mean(2, 0),
                 mean(0, 1), mean(1, 1), mean(2, 1), mean(0, 2), mean(1, 2), mean(2, 2));
-    if (!world.animals().empty()) {
+    if (report_animals) {
         // Animals, by what their organs make them: walkers, fliers and those
         // that breathe water; how many are still growing, and how well fed.
         std::size_t walkers = 0, fliers = 0, swimmers = 0, young = 0;
+        std::size_t small_fish = 0, large_swimmers = 0, live_hunter_parents = 0;
         double fed = 0;
         for (const phd::Animal& a : world.animals()) {
             const phd::Frame f = phd::frame(a.genome, a.growth);
             (f.wing ? fliers : !f.breathes_air ? swimmers : walkers) += 1;
             young += a.growth < 255;
+            small_fish += a.stock == phd::FishStock::small_fish;
+            large_swimmers += a.stock == phd::FishStock::large_swimmer;
+            live_hunter_parents += a.stock == phd::FishStock::large_swimmer && a.hunting == phd::HuntHistory::bred_after_kill;
             fed += double(a.energy) / double(f.store);
         }
         std::printf("  animals=%zu walkers=%zu fliers=%zu swimmers=%zu young=%zu fed_pct=%.0f brains=%s\n", world.animals().size(), walkers,
-                    fliers, swimmers, young, 100.0 * fed / double(world.animals().size()),
-                    world.brain_mode() == phd::BrainMode::evolving ? "evolving" : world.brain_mode() == phd::BrainMode::frozen ? "frozen" : "shuffled");
+                    fliers, swimmers, young, world.animals().empty() ? 0.0 : 100.0 * fed / double(world.animals().size()),
+                    phd::brain_mode_name(world.brain_mode()));
+        const auto& hunts = world.hunts();
+        std::printf("  large_swimmers=%zu small_fish=%zu live_hunter_parents=%zu swimmer_kills=%" PRIu64
+                    " small_fish_killed=%" PRIu64 " own_kill_energy=%" PRIu64 " scavenged_energy=%" PRIu64
+                    " hunter_breeders=%" PRIu64 " hunter_young=%" PRIu64 " hunter_generations=%u last_hunter_birth=%" PRIu64 "\n",
+                    large_swimmers, small_fish, live_hunter_parents, hunts.kills, hunts.small_fish_killed,
+                    hunts.own_kill_energy, hunts.scavenged_energy, hunts.breeders, hunts.young,
+                    unsigned(hunts.generations), hunts.last_birth_tick);
     }
     if (biomes) {
         for (int b = 0; b < phd::biome_count; ++b) {
@@ -119,7 +132,7 @@ int main(int argc, char** argv) {
     std::uint64_t ticks = 3840, every = 480;
     bool biomes = false;
     int animals = 0;
-    phd::BrainMode brains = phd::BrainMode::evolving;
+    std::optional<phd::BrainMode> brains;
     std::string load, save, png;
     for (int i = 1; i < argc; ++i) {
         const char* eq = std::strchr(argv[i], '=');
@@ -151,8 +164,11 @@ int main(int argc, char** argv) {
                 config.height = 96;
             }
         } else if (key == "brains") {
-            // The controls: frozen passes brains on unchanged; shuffled scrambles each at birth.
-            brains = value == "frozen" ? phd::BrainMode::frozen : value == "shuffled" ? phd::BrainMode::shuffled : phd::BrainMode::evolving;
+            brains = phd::parse_brain_mode(value);
+            if (!brains) {
+                std::fprintf(stderr, "unknown brain mode '%s' (expected evolving, frozen, shuffled or neutral)\n", value.c_str());
+                return 2;
+            }
         } else if (key == "load") {
             load = value;
         } else if (key == "save") {
@@ -176,9 +192,9 @@ int main(int argc, char** argv) {
     if (animals > 0 && world.animals().empty()) {
         world.seed_animals(animals);
     }
-    if (animals > 0) {
-        world.set_brain_mode(brains);
-    }
+    if (brains) world.set_brain_mode(*brains);
+    const bool report_animals = animals > 0 || brains.has_value() || world.has_had_animals() ||
+                                world.brain_mode() != phd::BrainMode::evolving;
     const auto end = world.tick() + ticks;
     auto started = std::chrono::steady_clock::now();
     std::uint64_t since = 0;
@@ -187,13 +203,13 @@ int main(int argc, char** argv) {
         ++since;
         if (every && (world.tick() % every == 0 || world.tick() == end)) {
             const auto now = std::chrono::steady_clock::now();
-            census(world, std::chrono::duration<double, std::micro>(now - started).count() / double(since), biomes);
+            census(world, std::chrono::duration<double, std::micro>(now - started).count() / double(since), biomes, report_animals);
             started = now;
             since = 0;
         }
     }
     if (!every) {
-        census(world, 0, biomes);
+        census(world, 0, biomes, report_animals);
     }
     if (!save.empty() && !phd::write_file_atomic(save, world.save())) {
         std::fprintf(stderr, "could not save %s\n", save.c_str());

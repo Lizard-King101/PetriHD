@@ -1,4 +1,7 @@
 /build*/
 *.phdw
+!/docs/experiments/lesson1-batch1/retained-*.phdw
+!/docs/experiments/lesson2-batch1/slot-*.phdw
+!/docs/experiments/peer-breeding-batch1/confirmed/*.phdw
 *.tmp
 petrihd-*.png

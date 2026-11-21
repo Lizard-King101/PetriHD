@@ -16,8 +16,29 @@ endif()
 option(PETRIHD_GUI "Build the windowed app (needs SDL2)" ON)
 
 # The simulation: deterministic, no dependencies.
-add_library(petrihd_core core/world.cpp core/terrain.cpp core/plants.cpp core/animals.cpp core/brain.cpp core/file.cpp core/png.cpp)
+set(PETRIHD_CORE_SOURCES core/world.cpp core/terrain.cpp core/plants.cpp core/animals.cpp core/predation.cpp core/brain.cpp core/file.cpp core/png.cpp)
+add_library(petrihd_core ${PETRIHD_CORE_SOURCES})
 target_include_directories(petrihd_core PUBLIC core)
+
+# The optional study builds its observation points into its own simulation.
+add_executable(petrihd-swimmer-trace EXCLUDE_FROM_ALL tools/swimmer_trace.cpp ${PETRIHD_CORE_SOURCES})
+target_include_directories(petrihd-swimmer-trace PRIVATE core tools)
+target_compile_definitions(petrihd-swimmer-trace PRIVATE PETRIHD_SWIMMER_TRACE)
+
+find_package(Threads QUIET)
+if(Threads_FOUND)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS tools/nursery_view.html)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/tools/nursery_view.html" NURSERY_HTML)
+    # Keep each embedded literal short enough for MSVC, preserving the page's newlines.
+    string(REPLACE "\n" "\n)PHDNURSERY\"\nR\"PHDNURSERY(" NURSERY_HTML "${NURSERY_HTML}")
+    configure_file(apps/nursery_page.in.hpp nursery_page.hpp @ONLY)
+    add_executable(petrihd-nursery EXCLUDE_FROM_ALL apps/nursery.cpp apps/lesson_one.cpp apps/breeding_curriculum.cpp apps/nursery_film.cpp)
+    target_include_directories(petrihd-nursery PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(petrihd-nursery PRIVATE petrihd_core Threads::Threads)
+    if(MSVC)
+        target_compile_options(petrihd-nursery PRIVATE /utf-8)
+    endif()
+endif()
 
 # Terrain art: no GL, so headless screenshots match the window.
 add_library(petrihd_art gfx/terrain_art.cpp gfx/plant_sprites.cpp gfx/ground_art.cpp gfx/water_surface.cpp)
@@ -37,6 +58,9 @@ enable_testing()
 add_executable(petrihd_core_tests tests/core_test.cpp)
 target_link_libraries(petrihd_core_tests PRIVATE petrihd_core)
 add_test(NAME core COMMAND petrihd_core_tests)
+add_executable(petrihd_predation_tests tests/predation_test.cpp)
+target_link_libraries(petrihd_predation_tests PRIVATE petrihd_core)
+add_test(NAME predation COMMAND petrihd_predation_tests)
 add_executable(petrihd_camera_tests tests/camera_test.cpp)
 target_include_directories(petrihd_camera_tests PRIVATE gfx)
 add_test(NAME camera COMMAND petrihd_camera_tests)

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+#include <type_traits>
 
 #include "fnv.hpp"
 #include "math.hpp"
@@ -26,7 +28,29 @@ constexpr std::uint32_t river_min_flow = 3000;
 constexpr int lake_start_level = 700;
 
 constexpr char save_magic[4] = {'P', 'H', 'D', 'W'};
-constexpr std::uint32_t save_version = 12; // 5 added snags, 6 the layout, 7 the corrected flood extent, 8 the sky at the saved tick, 9 animals, 10 their young, 11 their brains, 12 scents and calls
+constexpr std::uint32_t save_version = 18; // 18 saves a pond's refill interval
+
+template<class Stats, class Visit>
+void hunt_fields(Stats& s, Visit field) {
+    field(s.kills);
+    field(s.small_fish_killed);
+    field(s.own_kill_energy);
+    field(s.scavenged_energy);
+    field(s.breeders);
+    field(s.young);
+    field(s.last_birth_tick);
+    field(s.generations);
+}
+
+template<class Remains, class Visit>
+void carcass_fields(Remains& c, Visit field) {
+    field(c.x);
+    field(c.y);
+    field(c.energy);
+    field(c.killer);
+    field(c.length_mm);
+    field(c.heading);
+}
 
 // Little-endian serialisation of integers and arrays of them.
 struct Writer {
@@ -75,14 +99,19 @@ int signed_angle(int a) { return ((a + 128) & 255) - 128; }
 
 } // namespace
 
-World::World(const WorldConfig& config)
+World::World(const WorldConfig& config, const std::vector<PondPatch>& reed_beds)
     : config_(config),
       nodes_x_((config.width + node - 1) / node),
       nodes_y_((config.height + node - 1) / node),
       weather_rng_(stream_seed(config.seed, purpose_weather)),
       plant_rng_(stream_seed(config.seed, purpose_plants)),
       fire_rng_(stream_seed(config.seed, purpose_fire)) {
-    terrain_.generate(config.seed, config.width, config.height, config.ocean_percent, config.layout);
+    const bool pond = config.layout == Layout::training_pond;
+    if (!pond && !reed_beds.empty()) throw std::invalid_argument("Reed beds require a training pond");
+    if (pond && (config.width < 8 || config.height < 8 || config.width > 128 || config.height > 128 ||
+                 !config.pond_depth_dm || config.pond_depth_dm > 1000 || !config.pond_food || !config.pond_refill_ticks))
+        throw std::invalid_argument("Invalid training pond dimensions, depth or food supply");
+    terrain_.generate(config.seed, config.width, config.height, config.ocean_percent, config.layout, config.pond_depth_dm);
     const auto n = cells();
     water_.assign(n, 0);
     depth_.assign(n, 0);
@@ -99,12 +128,13 @@ World::World(const WorldConfig& config)
     lake_area_.assign(lakes_.size(), 0);
     lake_surfaces_.resize(lakes_.size());
     fronts_.reserve(max_fronts);
-    plants_.assign(max_plants, Plant{});
+    const int plant_capacity = pond ? int(n) : max_plants;
+    plants_.assign(plant_capacity, Plant{});
     animals_.reserve(max_animals);
     brains_.reserve(max_animals);
-    free_.resize(max_plants);
-    for (int k = 0; k < max_plants; ++k) {
-        free_[std::size_t(k)] = std::uint32_t(max_plants - 1 - k); // index 0 comes out first
+    free_.resize(plant_capacity);
+    for (int k = 0; k < plant_capacity; ++k) {
+        free_[std::size_t(k)] = std::uint32_t(plant_capacity - 1 - k); // index 0 comes out first
     }
     occupancy_.assign(n * 4, 0);
     canopy_height_.assign(n, 0);
@@ -118,6 +148,20 @@ World::World(const WorldConfig& config)
     burnt_.assign(n, 0);
     rain_.assign(std::size_t(nodes_x_) * nodes_y_, 0);
     cloud_.assign(rain_.size(), 0);
+
+    if (pond) {
+        wind_speed_ = 0;
+        lakes_[1].level = 1024;
+        lake_surfaces_[1].stage = config.pond_depth_dm;
+        lake_area_[1] = terrain_.basins[1].area;
+        for (std::size_t i = 0; i < n; ++i) {
+            temperature_[i] = std::int16_t(config.climate);
+            biome_[i] = std::uint8_t(terrain_.basin[i] ? Biome::lake : Biome::beach);
+            if (terrain_.basin[i]) { water_[i] = std::uint8_t(Water::lake); depth_[i] = config.pond_depth_dm; }
+        }
+        plant_training_pond(reed_beds);
+        return;
+    }
 
     // A first guess at soil water from the distance to the sea; the weather
     // takes over from here.
@@ -146,6 +190,7 @@ World::World(const WorldConfig& config)
 }
 
 int World::daylight() const {
+    if (config_.layout == Layout::training_pond) return config_.pond_light;
     const int sun = -icos(day_angle()) + isin(season_angle()) * 160 / 1024;
     return std::clamp((sun + 200) * 255 / 1224, 0, 255);
 }
@@ -168,8 +213,7 @@ int World::temperature_at(std::size_t i, bool water) const {
     return mean_temperature(i) + seasonal + daily + sun + pooling;
 }
 
-void World::step() {
-    ++tick_;
+void World::advance_landscape() {
     if (tick_ % 60 == 0) {
         update_wind();
     }
@@ -187,9 +231,18 @@ void World::step() {
     if (tick_ % 2 == 0) {
         update_fire();
     }
+}
+
+void World::step(PondTick* pond_tick) {
+    ++tick_;
+    if (pond_tick) *pond_tick = {};
+    if (config_.layout == Layout::training_pond) {
+        if (config_.pond_refill_ticks == 1 || tick_ % config_.pond_refill_ticks == 0) refill_training_pond();
+    } else advance_landscape();
     if (!animals_.empty()) {
-        update_animals();
+        update_animals(pond_tick);
     }
+    if (!carcasses_.empty() && tick_ % animal_stagger == 0) decay_carcasses();
 }
 
 void World::update_wind() {
@@ -876,6 +929,11 @@ std::uint64_t World::fingerprint() const {
     if (config_.layout != Layout::valley) {
         hash.add(std::uint32_t(config_.layout)); // a valley's fingerprint is what it was before layouts
     }
+    if (config_.hungry_drive_loss != usual_hungry_drive_loss) hash.add(config_.hungry_drive_loss);
+    if (config_.layout == Layout::training_pond) {
+        hash.add(config_.pond_depth_dm); hash.add(config_.pond_food); hash.add(config_.pond_light);
+        if (config_.pond_refill_ticks != 1) hash.add(config_.pond_refill_ticks);
+    }
     hash.add(tick_);
     hash.add(weather_rng_.state());
     hash.add(std::uint32_t(wind_angle_));
@@ -983,7 +1041,14 @@ std::uint64_t World::fingerprint() const {
         hash.add(a.stride);
         hash.add(a.energy);
         hash.bytes(a.genome.gene, agene_count);
+        hash.add(a.pain);
+        hash.add(a.pain_bearing);
+        hash.add(std::uint8_t(a.stock));
+        hash.add(std::uint8_t(a.hunting));
+        hash.add(a.hunting_ancestors);
     }
+    if (has_had_animals()) hunt_fields(hunts_, [&](auto value) { hash.add(value); });
+    for (const auto& c : carcasses_) carcass_fields(c, [&](auto value) { hash.add(value); });
     return hash.value();
 }
 
@@ -997,7 +1062,10 @@ std::size_t World::memory_bytes() const {
            bytes(runoff_) + bytes(flow_) + bytes(biome_) + bytes(lakes_) + fronts_.capacity() * sizeof(Front) +
            bytes(rain_) + bytes(cloud_) + bytes(accumulated_) + bytes(plants_) + bytes(free_) + bytes(occupancy_) +
            bytes(canopy_height_) + bytes(canopy_cover_) + bytes(litter_) + bytes(fire_) + bytes(fire_next_) + bytes(burnt_) +
-           bytes(previous_water_) + bytes(lake_area_) + bytes(lake_surfaces_);
+           bytes(previous_water_) + bytes(lake_area_) + bytes(lake_surfaces_) + bytes(animals_) + bytes(brains_) +
+           bytes(animal_head_) + bytes(animal_next_) + bytes(forage_) + bytes(calls_) + bytes(carcasses_) + bytes(carcass_head_) +
+           bytes(scent_plant_) + bytes(scent_animal_) + bytes(scent_ready_) + bytes(scent_legs_) + bytes(scent_water_) +
+           bytes(scent_wings_) + bytes(scent_scratch_);
 }
 
 // Layout, little-endian: magic, version, the config, the clock and weather,
@@ -1006,7 +1074,11 @@ std::size_t World::memory_bytes() const {
 std::vector<std::uint8_t> World::save() const {
     Writer w;
     w.out.assign(save_magic, save_magic + 4);
-    w.put(save_version);
+    const bool sparse_pond = config_.layout == Layout::training_pond && plant_count() < std::size_t((width() - 2) * (height() - 2));
+    const std::uint32_t version = config_.layout == Layout::training_pond && config_.pond_refill_ticks != 1 ? 18 :
+                                  sparse_pond ? 17 : config_.layout == Layout::training_pond ? 16 :
+                                  config_.hungry_drive_loss == usual_hungry_drive_loss ? 14 : 15;
+    w.put(version);
     w.put(config_.seed);
     w.put(std::uint32_t(config_.width));
     w.put(std::uint32_t(config_.height));
@@ -1014,6 +1086,9 @@ std::vector<std::uint8_t> World::save() const {
     w.put(config_.climate);
     w.put(config_.seasons);
     w.put(std::uint32_t(config_.layout));
+    if (version >= 15) w.put(config_.hungry_drive_loss);
+    if (version >= 16) { w.put(config_.pond_depth_dm); w.put(config_.pond_food); w.put(config_.pond_light); }
+    if (version >= 18) w.put(config_.pond_refill_ticks);
     w.put(tick_);
     w.put(weather_rng_.state());
     w.put(std::uint32_t(wind_angle_));
@@ -1098,6 +1173,9 @@ std::vector<std::uint8_t> World::save() const {
         w.put(call.pitch);
         w.put(call.loud);
     }
+    // Between forage surveys animals graze this field down while plants keep growing.
+    w.put(std::uint32_t(forage_.size()));
+    w.array(forage_);
     w.put(next_animal_id_);
     w.put(std::uint32_t(animals_.size()));
     for (const auto& a : animals_) {
@@ -1131,7 +1209,15 @@ std::vector<std::uint8_t> World::save() const {
         for (const auto gene : a.genome.gene) {
             w.put(gene);
         }
+        w.put(a.pain);
+        w.put(a.pain_bearing);
+        w.put(std::uint8_t(a.stock));
+        w.put(std::uint8_t(a.hunting));
+        w.put(a.hunting_ancestors);
     }
+    w.put(std::uint32_t(carcasses_.size()));
+    for (const auto& c : carcasses_) carcass_fields(c, [&](auto value) { w.put(value); });
+    hunt_fields(hunts_, [&](auto value) { w.put(value); });
     w.put(checksum(w.out.data(), w.out.size()));
     return std::move(w.out);
 }
@@ -1158,12 +1244,19 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
     config.seasons = r.get<std::int32_t>();
     if (version >= 6) {
         const auto layout = r.get<std::uint32_t>();
-        if (layout > std::uint32_t(Layout::development)) {
+        if (layout > std::uint32_t(version >= 16 ? Layout::training_pond : Layout::development)) {
             return false;
         }
         config.layout = Layout(layout);
     }
-    if (!r.ok || config.width <= 0 || config.height <= 0 || config.width > 4096 || config.height > 4096) {
+    if (version >= 15) config.hungry_drive_loss = r.get<std::uint8_t>();
+    if (version >= 16) {
+        config.pond_depth_dm = r.get<std::uint16_t>(); config.pond_food = r.get<std::uint16_t>(); config.pond_light = r.get<std::uint8_t>();
+        if (config.layout != Layout::training_pond || config.width < 8 || config.height < 8 || config.width > 128 || config.height > 128 ||
+            !config.pond_depth_dm || config.pond_depth_dm > 1000 || !config.pond_food) return false;
+    }
+    if (version >= 18) config.pond_refill_ticks = r.get<std::uint32_t>();
+    if (!r.ok || !config.pond_refill_ticks || config.width <= 0 || config.height <= 0 || config.width > 4096 || config.height > 4096) {
         return false;
     }
     World world(config);
@@ -1213,16 +1306,18 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
     world.fire_rng_.set_state(r.get<std::uint32_t>());
     world.next_plant_id_ = r.get<std::uint32_t>();
     const auto free_count = r.get<std::uint32_t>();
-    if (free_count > std::uint32_t(max_plants)) {
+    const auto capacity = std::uint32_t(world.plants_.size());
+    if (free_count > capacity) {
         return false;
     }
     world.free_.resize(free_count);
     r.array(world.free_);
+    if (std::any_of(world.free_.begin(), world.free_.end(), [capacity](auto index) { return index >= capacity; })) return false;
     std::fill(world.plants_.begin(), world.plants_.end(), Plant{});
     std::fill(world.occupancy_.begin(), world.occupancy_.end(), 0);
-    for (std::uint32_t k = 0; k < std::uint32_t(max_plants) - free_count && r.ok; ++k) {
+    for (std::uint32_t k = 0; k < capacity - free_count && r.ok; ++k) {
         const auto index = r.get<std::uint32_t>();
-        if (index >= std::uint32_t(max_plants)) {
+        if (index >= capacity) {
             return false;
         }
         Plant& p = world.plants_[index];
@@ -1265,15 +1360,16 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
     }
     if (version >= 9) {
         if (version >= 11) {
-            world.brain_mode_ = BrainMode(r.get<std::uint8_t>());
+            const auto mode = r.get<std::uint8_t>();
+            const auto last_mode = version >= 13 ? BrainMode::neutral : BrainMode::shuffled;
+            if (mode > std::uint8_t(last_mode)) return false;
+            world.brain_mode_ = BrainMode(mode);
         }
         if (version >= 12) {
             const auto nodes = r.get<std::uint32_t>();
-            if (nodes > world.cells()) {
-                return false;
-            }
             world.scent_w_ = (world.width() + scent_node - 1) / scent_node;
             world.scent_h_ = (world.height() + scent_node - 1) / scent_node;
+            if (nodes && nodes != std::size_t(world.scent_w_) * world.scent_h_) return false;
             for (auto* field : {&world.scent_plant_, &world.scent_animal_, &world.scent_ready_, &world.scent_legs_, &world.scent_water_, &world.scent_wings_}) {
                 field->resize(nodes);
                 r.array(*field);
@@ -1292,6 +1388,12 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
                 call.loud = r.get<std::uint8_t>();
             }
         }
+        if (version >= 13) {
+            const auto cells = r.get<std::uint32_t>();
+            if (cells && cells != world.cells()) return false;
+            world.forage_.resize(cells);
+            r.array(world.forage_);
+        }
         world.next_animal_id_ = r.get<std::uint32_t>();
         const auto count = r.get<std::uint32_t>();
         if (count > std::uint32_t(max_animals)) {
@@ -1304,6 +1406,7 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
             a.lineage = r.get<std::uint32_t>();
             a.x = r.get<std::int32_t>();
             a.y = r.get<std::int32_t>();
+            if (a.x < 0 || a.y < 0 || a.x / 256 >= world.width() || a.y / 256 >= world.height()) return false;
             a.z = r.get<std::int16_t>();
             a.heading = r.get<std::uint8_t>();
             a.turn = r.get<std::int8_t>();
@@ -1334,9 +1437,22 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
                     r.get<std::int8_t>();
                 }
             }
-            if (version >= 12) {
-                for (auto& weight : world.brains_[std::size_t(&a - world.animals_.data())].weight) {
-                    weight = r.get<std::int8_t>();
+            auto& mind = world.brains_[std::size_t(&a - world.animals_.data())];
+            if (version >= 14) {
+                for (auto& weight : mind.weight) weight = r.get<std::int8_t>();
+            } else if (version >= 12) {
+                // Preserve every learned connection and bias. New senses and
+                // the new action start disconnected in an imported network.
+                constexpr int old_inputs = 59, old_outputs = 9;
+                mind = {};
+                for (int h = 0; h < brain::hidden; ++h) {
+                    auto* row = mind.weight + h * brain::unit_bytes;
+                    for (int i = 0; i < old_inputs; ++i) row[i] = r.get<std::int8_t>();
+                    row[brain::inputs] = r.get<std::int8_t>();
+                }
+                auto* outputs = mind.weight + brain::hidden * brain::unit_bytes;
+                for (int i = 0; i < old_outputs * brain::output_bytes; ++i) {
+                    outputs[i] = r.get<std::int8_t>();
                 }
             }
             a.stride = r.get<std::uint32_t>();
@@ -1346,11 +1462,36 @@ bool World::load(const std::uint8_t* data, std::size_t size) {
             for (int gene = 0; gene < agene_count; ++gene) {
                 a.genome.gene[gene] = gene < genes ? r.get<std::uint8_t>() : std::uint8_t(96);
             }
+            if (a.growth < newborn_growth || a.medium > std::uint8_t(Medium::air)) return false;
+            if (version >= 14) {
+                a.pain = r.get<std::uint8_t>();
+                a.pain_bearing = r.get<std::uint8_t>();
+                a.stock = FishStock(r.get<std::uint8_t>());
+                a.hunting = HuntHistory(r.get<std::uint8_t>());
+                a.hunting_ancestors = r.get<std::uint16_t>();
+                if (a.pain > 127 || a.stock > FishStock::large_swimmer || a.hunting > HuntHistory::bred_after_kill) return false;
+            }
         }
+    }
+    if (version >= 14) {
+        const auto count = r.get<std::uint32_t>();
+        constexpr std::size_t carcass_disk_bytes = 19;
+        if (count > std::size_t(r.end - r.at) / carcass_disk_bytes) return false;
+        world.carcasses_.resize(count);
+        const auto read = [&](auto& field) { field = r.get<std::decay_t<decltype(field)>>(); };
+        for (std::size_t i = 0; i < count; ++i) {
+            auto& c = world.carcasses_[i];
+            carcass_fields(c, read);
+            if (c.x < 0 || c.y < 0 || c.x / 256 >= world.width() || c.y / 256 >= world.height() ||
+                c.energy < 0 || c.length_mm == 0) return false;
+            world.index_carcass(i);
+        }
+        hunt_fields(world.hunts_, read);
     }
     if (!r.ok || r.at != r.end) {
         return false;
     }
+    if (!world.forage_.empty() && !world.animals_.empty()) world.index_animals();
     if (version < 8) {
         world.restore_weather_from_fronts();
     }

@@ -51,6 +51,7 @@ Decision think(const Senses& senses, const Brain& brain) {
     d.mate = out[out_mate] > 0;
     d.fly = out[out_fly] > 0;
     d.call = out[out_call] > 0;
+    d.attack = out[out_attack] > 0;
     for (int m = 0; m < memories; ++m) {
         d.memory[m] = static_cast<std::int8_t>(out[out_memory0 + m]);
     }
@@ -95,7 +96,7 @@ void shuffle(Brain& brain, std::uint32_t& state) {
     }
 }
 
-Brain founder() {
+Brain founder(bool hunts) {
     Brain b{};
     const auto in = [&](int unit, int input) -> std::int8_t& { return b.weight[unit * unit_bytes + input]; };
     const auto bias = [&](int unit) -> std::int8_t& { return b.weight[unit * unit_bytes + inputs]; };
@@ -147,6 +148,23 @@ Brain founder() {
     // 11: a call in a voice like its own, to the right. It turns toward it.
     in(11, self_input(heard_right)) = 64;
     out(out_turn, 11) = 48;
+    // A fresh hit from the right turns the founder left and increases its pace.
+    in(12, self_input(pain_right)) = -64;
+    out(out_turn, 12) = 96;
+    in(13, self_input(self_pain)) = 64;
+    out(out_pace, 13) = 80;
+    out_bias(out_attack) = -64;
+    if (hunts) {
+        // The large swimmer starts with two heritable reflexes. A smaller body
+        // at its mouth and hunger favour a strike. Smaller bodies in view draw a turn.
+        in(14, self_input(self_mouth_size)) = -96;
+        out(out_attack, 14) = 40;
+        out(out_attack, 4) = 64;
+        out_bias(out_attack) = -96;
+        in(15, sector_input(left, in_size)) = 40, in(15, sector_input(far_left, in_size)) = 24;
+        in(15, sector_input(right, in_size)) = -40, in(15, sector_input(far_right, in_size)) = -24;
+        out(out_turn, 15) = 16;
+    }
     // It keeps a steady pace unless something slows it.
     out_bias(out_pace) = 40;
     return b;

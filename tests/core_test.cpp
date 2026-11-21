@@ -242,6 +242,17 @@ constexpr std::uint64_t golden_seed1_t2400 = 0x46926542209791dcull;
 
 // Animals: bodies from organs, each keeping to where its body can live,
 // feeding, and the same on every run and after a save.
+// These two controls measure grazing and inheritance from identical founders.
+// Predatory founders and feeding from a kill have their own contact tests.
+void seed_grazers(phd::World& world) {
+    world.seed_animals(56);
+    for (std::size_t k = 0; k < world.animals().size(); ++k) {
+        if (world.animals()[k].stock == phd::FishStock::large_swimmer) {
+            const_cast<phd::brain::Brain&>(world.brain_of(k)) = phd::brain::founder();
+        }
+    }
+}
+
 void test_animals() {
     using namespace phd;
     // What the organs add up to.
@@ -270,8 +281,18 @@ void test_animals() {
     config.layout = Layout::development;
     World world(config), twin(config);
     const auto empty = world.fingerprint();
-    world.seed_animals(56);
-    twin.seed_animals(56);
+    seed_grazers(world);
+    seed_grazers(twin);
+    // Exercise takeoff even when every flier spawns within sight of grazing.
+    // The decision to fly over barren ground is tested in test_brains.
+    for (World* start : {&world, &twin}) {
+        for (const auto& a : start->animals()) {
+            if (frame(a.genome).air_speed) {
+                const_cast<Animal&>(a).wants |= wants_fly;
+                break;
+            }
+        }
+    }
     CHECK(world.animals().size() >= 40);
     CHECK(world.fingerprint() != empty);
     const auto founders = world.animals().size();
@@ -337,6 +358,61 @@ void test_animals() {
         loaded.step();
     }
     CHECK(loaded.fingerprint() == world.fingerprint());
+}
+
+void test_neutral_inheritance() {
+    using namespace phd;
+    WorldConfig config;
+    config.seed = 2;
+    config.width = 128;
+    config.height = 96;
+    config.layout = Layout::development;
+    World neutral(config), evolving(config);
+    neutral.set_brain_mode(BrainMode::neutral);
+    seed_grazers(neutral);
+    seed_grazers(evolving);
+    const brain::Brain founder = brain::founder();
+    bool shared_mutant = false, different_brain = false;
+    for (int t = 0; t < 3013; ++t) {
+        neutral.step();
+        if (different_brain) continue;
+        evolving.step();
+        CHECK(neutral.animals().size() == evolving.animals().size());
+        if (neutral.animals().size() != evolving.animals().size()) return;
+        for (std::size_t k = 0; k < neutral.animals().size(); ++k) {
+            const auto& child = neutral.animals()[k];
+            if (!child.mother) continue;
+            const auto& other = evolving.animals()[k];
+            CHECK(child.id == other.id && child.mother == other.mother && child.father == other.father);
+            CHECK(std::memcmp(child.genome.gene, other.genome.gene, agene_count) == 0);
+            // Identical founder brains produce the same early mutations. Once
+            // donors carry different weights, a newborn can inherit different wiring.
+            const auto& mind = neutral.brain_of(k);
+            if (std::memcmp(mind.weight, evolving.brain_of(k).weight, brain::bytes) == 0) {
+                shared_mutant |= std::memcmp(mind.weight, founder.weight, brain::bytes) != 0;
+            } else {
+                different_brain = true;
+            }
+        }
+    }
+    CHECK(shared_mutant && different_brain);
+
+    // Between two forage surveys the live plants and the sensed food differ.
+    const auto saved = neutral.save();
+    World loaded(config);
+    CHECK(loaded.load(saved.data(), saved.size()));
+    CHECK(loaded.brain_mode() == BrainMode::neutral);
+    CHECK(loaded.animals().size() == neutral.animals().size());
+    if (loaded.animals().size() != neutral.animals().size()) return;
+    for (std::size_t k = 0; k < neutral.animals().size(); ++k) {
+        const auto live = neutral.senses(k), restored = loaded.senses(k);
+        CHECK(std::memcmp(live.in, restored.in, brain::inputs) == 0);
+    }
+    for (int t = 0; t < 271; ++t) {
+        neutral.step();
+        loaded.step();
+    }
+    CHECK(loaded.save() == neutral.save());
 }
 
 // The brain: its arithmetic, how it is inherited, and the founders' reflexes.
@@ -435,6 +511,7 @@ int main() {
     test_files();
     test_animals();
     test_brains();
+    test_neutral_inheritance();
     test_golden();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

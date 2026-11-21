@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 #include "random.hpp"
 
@@ -18,6 +20,17 @@ constexpr int isin(int angle) {
 }
 
 constexpr int icos(int angle) { return isin(angle + 64); }
+
+// A binary angle from a direction, in integers, good to a degree or two.
+inline int angle_of(int dx, int dy) {
+    const int ax = std::abs(dx), ay = std::abs(dy);
+    const int low = std::min(ax, ay), high = std::max(ax, ay);
+    const int r = high ? low * 64 / high : 0;                // the slope within an octant, 0..64
+    const int within = r * (2048 + 17 * (64 - r)) / 4096;    // 0..32
+    const int first = ax >= ay ? within : 64 - within;       // 0..64, from +x toward +y
+    const int half = dx >= 0 ? first : 128 - first;
+    return (dy >= 0 ? half : 256 - half) & 255;
+}
 
 constexpr std::uint32_t isqrt(std::uint64_t n) {
     std::uint64_t root = 0, bit = std::uint64_t(1) << 62;

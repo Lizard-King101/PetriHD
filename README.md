@@ -4,10 +4,13 @@ An evolving world of plants and animals for a Raspberry Pi 3 B+ with a 7"
 touchscreen, the successor to [Petri](https://github.com/Lizard-King101/Petri).
 The design is in [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** milestone 2, plants. A generated valley running down to the
-sea, with hills, streams, ponds, seasons, weather and fire, and 100,000+
-plants, each with its own genome, that grow, compete, seed, evolve, burn
-and come back. Animals have bodies and graze but no brains yet: see [docs/ANIMALS.md](docs/ANIMALS.md). See [docs/PLANTS.md](docs/PLANTS.md).
+The valley runs down to the sea, with hills, streams, ponds, seasons,
+weather and fire. More than 100,000 plants can grow, compete, set seed,
+evolve, burn and come back. Each has its own genome.
+Animals sense food and neighbours, graze, hunt, call and mate
+using inherited brains. The development map starts with 48 founders.
+Its large swimmers can strike smaller fish and feed from their carcasses.
+[Animals and brain experiments](docs/ANIMALS.md) · [Plants](docs/PLANTS.md)
 
 ## Build
 
@@ -57,6 +60,20 @@ Add `--shot shoreline.png` to capture the reference frame and exit. The
 capture hides the budget HUD and uses a fixed animation phase.
 
 ![Shoreline study with layered crowns, reeds and a creature at the water’s edge](docs/images/shoreline_study.png)
+
+## Large-swimmer training pond
+
+Build `petrihd-nursery` and run `build/petrihd-nursery train build/lesson1 4 --visual`.
+Open `build/lesson1/nursery.html` to watch both swimmers eat, build mating
+drive and produce young. The batch ranks sixteen brains and tests the four
+retained brains on two fresh panels. [Lesson 1 and its first results](docs/ANIMALS.md#the-large-swimmer-nursery)
+
+Lesson 2 follows four selected swimmers as they forage among three reed
+beds and return to their partner. [Run Lesson 2 and compare the matched seeds](docs/ANIMALS.md#lesson-2-in-the-same-pond)
+
+The next nursery exercise breeds and selects four generations at each food
+refill interval. It follows naturally born young until they reproduce and
+exports the independently verified breeders. [Training protocol and results](docs/experiments/peer-breeding-batch1/README.md)
 
 ## Development map
 

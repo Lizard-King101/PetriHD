@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 namespace phd {
 
@@ -18,7 +20,7 @@ enum AnimalGene : std::uint8_t {
     agene_neck,
     agene_gills,      // lungs below 96, gills above 160, both between
     agene_plant_gut,
-    agene_meat_gut,   // nothing to eat with it yet; it has mass
+    agene_meat_gut,   // energy it can digest from a carcass
     agene_fat,        // a store for lean times, and weight to carry
     agene_hue,
     agene_tone,
@@ -59,6 +61,9 @@ struct Frame {
 
 // `growth` is how much of its adult length it has reached, out of 255.
 Frame frame(const AnimalGenome& genome, int growth = 255);
+inline int body_length_mm(const AnimalGenome& genome, int growth) {
+    return (200 + genome.gene[agene_size] * 9) * growth / 255;
+}
 
 // How unlike two genomes are. Two animals can breed only if this is small,
 // so kinds that drift apart stop interbreeding without that being coded.
@@ -66,7 +71,26 @@ int genetic_distance(const AnimalGenome& a, const AnimalGenome& b);
 constexpr int breeding_distance = 240;
 
 enum class Medium : std::uint8_t { land, water, air };
-enum Wants : std::uint8_t { wants_eat = 1, wants_mate = 2, wants_fly = 4, wants_call = 8 };
+enum Wants : std::uint8_t { wants_eat = 1, wants_mate = 2, wants_fly = 4, wants_call = 8, wants_attack = 16 };
+
+// Maternal founder cohorts for the census. These labels never guide an action.
+enum class FishStock : std::uint8_t { other, small_fish, large_swimmer };
+enum class HuntHistory : std::uint8_t { none, fed_from_kill, bred_after_kill };
+
+struct Carcass {
+    std::int32_t x, y, energy;
+    std::uint32_t killer; // zero for a natural death
+    std::uint16_t length_mm;
+    std::uint8_t heading;
+    std::int32_t next = -1; // another carcass in the cell, rebuilt on load
+};
+
+// Observations of the large-swimmer cohort, cumulative even after a hunter dies.
+struct HuntStats {
+    std::uint64_t kills = 0, small_fish_killed = 0, own_kill_energy = 0, scavenged_energy = 0;
+    std::uint64_t breeders = 0, young = 0, last_birth_tick = 0;
+    std::uint16_t generations = 0; // longest unbroken chain of hunters that fed and then bred
+};
 
 // A call: where it was made, by whom, at what pitch and how loud. It is
 // heard for a few ticks.
@@ -79,10 +103,10 @@ constexpr int call_ticks = 8;   // how long a call can be heard, and the least t
 constexpr int scent_node = 4;   // cells to a node of the scent grids
 constexpr int scent_every = 4;  // ticks between the scents spreading
 
-// How young get their brains. Evolving is the world as meant; the others are
-// controls: frozen passes brains on unchanged, shuffled scrambles each one
-// at birth.
-enum class BrainMode : std::uint8_t { evolving, frozen, shuffled };
+// How young get their brains. These values are stored in world saves.
+enum class BrainMode : std::uint8_t { evolving, frozen, shuffled, neutral };
+const char* brain_mode_name(BrainMode mode);
+std::optional<BrainMode> parse_brain_mode(std::string_view name);
 
 struct Animal {
     std::uint32_t id;
@@ -106,6 +130,10 @@ struct Animal {
     std::uint32_t stride;  // how far it has moved, 1/256 of a cell: its gait follows this
     std::int32_t energy;
     AnimalGenome genome;
+    std::uint8_t pain, pain_bearing; // strength and world bearing of the last strike
+    FishStock stock;
+    HuntHistory hunting;
+    std::uint16_t hunting_ancestors; // consecutive qualifying parents before this animal
 };
 
 constexpr int animal_stagger = 16;  // each animal's metabolism runs every 16 ticks
@@ -113,5 +141,7 @@ constexpr int breath_ticks = 600;   // a full breath
 constexpr int flying_height_dm = 30;
 constexpr int newborn_growth = 96;
 constexpr int mating_drive = 200;   // at this it looks for a mate
+constexpr std::uint8_t usual_hungry_drive_loss = 16;
+constexpr int mating_reach = 320;   // strictly less than 1.25 cells, in 1/256 cell
 
 } // namespace phd

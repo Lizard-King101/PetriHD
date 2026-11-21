@@ -2322,11 +2322,38 @@ void TiltView::pose_world_animals(const phd::World& world, const Camera& camera,
             at = at->second.seen == eased_frame_ ? std::next(at) : eased_.erase(at);
         }
     }
+    // A pale ribbed remnant, lying still at the surface or on the ground.
+    // It uses the same depth-tested animal layer as the living swimmers.
+    int remains = 0;
+    for (const auto& c : world.carcasses()) {
+        const float x = float(c.x) / 256, y = float(c.y) / 256;
+        if (!c.energy || std::fabs(x - camera.cx) > reach_x || std::fabs(y - camera.cy) > reach_y) continue;
+        creature::Body body;
+        body.length = float(c.length_mm) / (phd::cell_decimetres * 100);
+        body.girth = body.length * 0.10f;
+        body.leg_pairs = 0;
+        body.neck = body.eye = 0;
+        body.head = body.snout = body.girth * 0.6f;
+        body.tail = body.length * 0.18f;
+        body.pattern = creature::Pattern::stripes;
+        body.primary = {113, 86, 69, 255};
+        body.secondary = {204, 190, 149, 255};
+        creature::Pose pose;
+        pose.x = x, pose.y = y, pose.pace = 0;
+        pose.heading = c.heading * turn / 256;
+        const float water = water_level(x, y);
+        if (water != dry) {
+            pose.medium = creature::Medium::water;
+            pose.height = std::max(ground(x, y) + body.girth, water - body.girth);
+        }
+        animals_.push_back({body, pose});
+        if (++remains == 8) break;
+    }
 }
 
 void TiltView::prepare_animals(const phd::World& world, const Camera& camera, int screen_w, int screen_h, int view_h, double time) {
     pieces_.clear();
-    if (world.animals().empty()) {
+    if (!world.has_had_animals()) {
         pose_animals(time);
     } else {
         pose_world_animals(world, camera, screen_w, view_h);

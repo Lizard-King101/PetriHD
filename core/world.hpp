@@ -24,6 +24,31 @@ struct WorldConfig {
     int climate = 90;
     int seasons = 140;
     Layout layout = Layout::valley;
+    std::uint8_t hungry_drive_loss = usual_hungry_drive_loss; // drive lost per metabolic pass below half energy
+    std::uint16_t pond_depth_dm = 20, pond_food = 600; // edible energy per planted cell
+    std::uint32_t pond_refill_ticks = 1;
+    std::uint8_t pond_light = 200;
+};
+
+// Coordinates of a rectangular reed bed at pond creation. The reeds themselves are saved.
+struct PondPatch {
+    int x, y, width, height;
+    bool contains(int cx, int cy) const { return cx >= x && cy >= y && cx - x < width && cy - y < height; }
+};
+
+// Observations of the two training founders, indexed by founder ID minus one.
+// Metabolic samples precede any transfer of energy or resetting of drive at birth.
+struct PondTick {
+    struct Founder {
+        bool fed_check = false, reached_ready = false;
+        int movement_cost = 0, call_cost = 0, upkeep_cost = 0, strike_cost = 0;
+        int grazed_cell = -1;
+        int plant_taken = 0; // raw food removed by this founder
+        int plant_energy_gained = 0; // after digestion and the body's storage cap
+    };
+    std::array<Founder, 2> founders{};
+    int near_pair_drive = 0;
+    std::array<int, 2> birth_drives{};
 };
 
 enum class Water : std::uint8_t { none, ocean, lake, river };
@@ -63,9 +88,9 @@ public:
     static constexpr int max_animals = 4096;
     static constexpr int plant_stagger = 16; // each plant grows every 16 ticks
 
-    explicit World(const WorldConfig& config);
+    explicit World(const WorldConfig& config, const std::vector<PondPatch>& reed_beds = {});
 
-    void step();
+    void step(PondTick* pond_tick = nullptr);
 
     std::uint64_t fingerprint() const;
     std::uint64_t tick() const { return tick_; }
@@ -125,8 +150,16 @@ public:
     const std::vector<Plant>& plant_pool() const { return plants_; }
     // Animals: only the living, in no particular order.
     const std::vector<Animal>& animals() const { return animals_; }
-    // Puts `count` founders into the world, each where its body can live.
-    void seed_animals(int count);
+    bool has_had_animals() const { return next_animal_id_ != 1; }
+    const std::vector<Carcass>& carcasses() const { return carcasses_; }
+    const HuntStats& hunts() const { return hunts_; }
+    // Only the large-swimmer founders take the optional nursery brain.
+    void seed_animals(int count, const brain::Brain& swimmer_brain = brain::founder(true));
+    // Assign these brains in order to successfully placed large swimmers, cycling through the pool.
+    void seed_animals(int count, const std::vector<brain::Brain>& swimmer_pool);
+    // Start with the development lake's first group of four large swimmers, optionally planting food at their homes.
+    void seed_swimmer_pond(const std::vector<brain::Brain>& swimmer_pool, bool stock_food);
+    void seed_training_pair(const brain::Brain& left, const brain::Brain& right, int start_energy_percent = 60, int gap_cells = 1);
     const brain::Brain& brain_of(std::size_t index) const { return brains_[index]; }
     // What the animal at this index senses now.
     brain::Senses senses(std::size_t index) const;
@@ -178,9 +211,19 @@ private:
     // Plants (plants.cpp).
     void seed_plants();
     void update_plants();
-    void update_animals();
+    void plant_training_pond(const std::vector<PondPatch>& reed_beds);
+    void refill_training_pond();
+    void advance_landscape();
+    void update_animals(PondTick* pond_tick);
     void index_animals();
     void refresh_forage();
+    std::int32_t bite_target(const Animal& animal, int length_mm) const;
+    void strike(Animal& animal, const Frame& body);
+    void leave_carcass(const Animal& dead, std::uint32_t killer);
+    bool eat_meat(Animal& animal, const Frame& body);
+    void index_carcass(std::size_t index);
+    void decay_carcasses();
+    void record_hunter_birth(Animal& young, Animal& mother, Animal& father);
     void grow_plant(std::uint32_t index);
     void reproduce(std::uint32_t index);
     bool establish(const PlantGenome& genome, std::uint32_t lineage, int cell, bool clone);
@@ -242,6 +285,9 @@ private:
     Random plant_rng_, fire_rng_;
     std::vector<Animal> animals_;
     std::vector<brain::Brain> brains_;       // parallel to animals_
+    std::vector<Carcass> carcasses_;
+    std::vector<std::int32_t> carcass_head_;
+    HuntStats hunts_;
     BrainMode brain_mode_ = BrainMode::evolving;
     // Scratch, rebuilt as animals move and plants grow: who is in each cell
     // (a list through animal_next_), and the grazing there.

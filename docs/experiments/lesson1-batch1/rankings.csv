@@ -1,0 +1,17 @@
+rank,pool_slot,brain,training_births,mean_timing,mean_feeding,validation_a_births,validation_b_births,status
+1,1,07c252a88ea89cd9,4,1.0000,1.0000,4,4,promoted
+2,2,88328337918cc1fa,4,1.0000,1.0000,4,4,promoted
+3,3,02c8405e0f2f4c2c,4,1.0000,1.0000,4,4,promoted
+4,7,95eead7be5e5bff2,4,1.0000,1.0000,4,4,promoted
+5,8,7235e04694e388b4,4,1.0000,1.0000,,,not retained
+6,9,2f9de16e03b2ee40,4,1.0000,1.0000,,,not retained
+7,10,a576931f6c8da32d,4,1.0000,1.0000,,,not retained
+8,11,122f461fa7c3c2fb,4,1.0000,1.0000,,,not retained
+9,13,ac3e1c701ab724b4,4,1.0000,1.0000,,,not retained
+10,14,c129529b59251929,4,1.0000,1.0000,,,not retained
+11,15,f0c3ee7d5265261d,4,1.0000,1.0000,,,not retained
+12,6,3f1ad7902b69fe75,0,0.2500,0.2500,,,not retained
+13,4,b40cd030a9c36015,0,0.2400,0.2400,,,not retained
+14,5,78e5056ac3f8d8c2,0,0.0000,0.0000,,,not retained
+15,12,23d92e7273cce996,0,0.0000,0.0000,,,not retained
+16,16,9a51d76f0b08619e,0,0.0000,0.0000,,,not retained

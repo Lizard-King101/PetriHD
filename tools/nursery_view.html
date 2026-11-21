@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PetriHD · Founder nursery</title>
+<style>
+:root {
+  color-scheme: dark;
+  --ink: #edf2e8;
+  --quiet: #a7b8ae;
+  --rim: #344b46;
+  --gold: #efbd78;
+  --bg: #0d1918;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px "Inter","Segoe UI",sans-serif;
+}
+main {
+  width: min(1480px,100%);
+  margin: auto;
+  padding: clamp(12px,2.4vw,40px);
+}
+header,.identity,.actions,.transport,.field {
+  display: flex;
+  align-items: center;
+}
+header {
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 19px;
+}
+.identity {
+  gap: 13px;
+}
+.mark {
+  width: 33px;
+  height: 33px;
+  border: 1.5px solid #b7cbb7;
+  border-radius: 50%;
+  position: relative;
+  transform: rotate(-26deg);
+}
+.mark:before,.mark:after {
+  content: "";
+  position: absolute;
+  inset: 7px 4px;
+  border: 1px solid #b7cbb7;
+  border-radius: 50%;
+}
+.mark:after {
+  inset: 11px 9px;
+  background: #d1a869;
+  border: 0;
+}
+.brand {
+  font: 600 12px "IBM Plex Mono",Consolas,monospace;
+  letter-spacing: .13em;
+  color: #bfd3c3;
+}
+.identity h1 {
+  font-weight: 500;
+  font-size: clamp(17px,2vw,23px);
+  margin: 2px 0 0;
+  letter-spacing: -.035em;
+}
+.actions,.transport {
+  gap: 9px;
+}
+button,select {
+  border: 1px solid var(--rim);
+  border-radius: 5px;
+  background: #172724;
+  color: var(--ink);
+  padding: 8px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover,select:hover {
+  background: #213731;
+  border-color: #759385;
+}
+button:focus-visible,select:focus-visible,input:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 3px;
+}
+button[aria-pressed=true] {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+button:disabled {
+  opacity: .55;
+  cursor: default;
+}
+#record {
+  background: #e4bb81;
+  border-color: #e4bb81;
+  color: #15211c;
+}
+#record.recording {
+  background: #853c36;
+  color: white;
+  border-color: #c97b6d;
+}
+.stage {
+  position: relative;
+  background: #113c40;
+  border: 1px solid var(--rim);
+  border-radius: 5px;
+  overflow: hidden;
+}
+canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16/9;
+  touch-action: manipulation;
+}
+.transport {
+  padding: 14px 0;
+  flex-wrap: wrap;
+}
+.field {
+  gap: 7px;
+  color: var(--quiet);
+  font-size: 12px;
+}
+.field select {
+  font-size: 13px;
+}
+#play {
+  min-width: 74px;
+}
+#scrub {
+  flex: 1 1 115px;
+  min-width: 78px;
+  accent-color: #d9ad70;
+  cursor: pointer;
+}
+#time {
+  font: 12px "IBM Plex Mono",Consolas,monospace;
+  color: #c0cfc4;
+  min-width: 84px;
+  text-align: center;
+}
+[hidden] { display: none !important; }
+.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+#message {
+  min-height: 1em;
+  color: var(--quiet);
+  font-size: 13px;
+  margin: 0;
+}
+main:fullscreen {
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 12px 20px;
+}
+main:fullscreen .stage {
+  align-self: center;
+  width: min(100%,calc((100vh - 135px)*16/9));
+}
+main.clean:fullscreen header,main.clean:fullscreen .transport,main.clean:fullscreen #message {
+  display: none;
+}
+main.clean:fullscreen {
+  padding: 0;
+  background: black;
+}
+main.clean:fullscreen .stage {
+  width: min(100vw,calc(100vh*16/9));
+  border: 0;
+  border-radius: 0;
+  cursor: none;
+}
+@media(max-width:700px) {
+  header {
+    align-items: flex-start;
+  }
+  .actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 5px;
+  }
+  .actions button {
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+  .identity {
+    gap: 7px;
+  }
+  .mark {
+    width: 25px;
+    height: 25px;
+  }
+  .transport {
+    gap: 6px;
+  }
+  .field {
+    gap: 3px;
+  }
+  .transport select,.transport button {
+    padding: 6px;
+  }
+  .brand {
+    font-size: 10px;
+  }
+}
+</style>
+</head>
+<body><main id="player">
+<header><div class="identity"><span class="mark" aria-hidden="true"></span><div><div class="brand">PETRIHD</div><h1>Founder nursery</h1></div></div>
+<div class="actions"><button id="clean" aria-pressed="false" title="Toggle the film overlay (C)">Clean view</button><button id="full" title="Toggle full screen (F)">Full screen</button><button id="record">Record clip</button></div></header>
+<div class="stage"><canvas id="film" width="1280" height="720" aria-label="Replay of real large swimmers and small fish on the nursery lake. Select a fish to inspect it."></canvas></div>
+<div class="transport"><button id="play" title="Play or pause (Space)">Pause</button>
+<label id="brainField" class="field" hidden>Brain <select id="brain"></select></label>
+<label class="field">Trial <select id="chapter"></select></label><button id="ready" hidden>First readiness</button><button id="birth" hidden>First birth</button><button id="adult" hidden>First adult offspring</button><button id="grandchild" hidden>First grandchild</button>
+<input id="scrub" aria-label="Simulation tick" type="range" min="0" value="0" step="1">
+<output id="time">Tick 0</output>
+<label class="field">Speed <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+<label class="field">Camera <select id="lens"><option value="lake">Lake</option><option value="follow">Follow fish</option></select></label></div>
+<p id="message" role="status"></p><output id="pondReadout" class="sr-only"></output></main>
+<script>
+"use strict";
+const reel = /*NURSERY_REEL*/null;
+const el = id => document.getElementById(id);
+const canvas = el("film"), ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
+const mono = '"IBM Plex Mono",Consolas,monospace', sans = '"Inter","Segoe UI",sans-serif';
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), mix = (a, b, t) => a + (b - a) * t;
+const roles = { founder: "Hand-wired founders", selected: "Selected family", challenger: "New challenger", retained: "Retained family", release: "Selected release", control: "Random-parent release" };
+const state = { index: 0, tick: 0, playing: true, clean: false, focus: 0, followLive: true };
+let take, clip, terrain, camera, depths, view, endTick, clock = 0, frameIndex = 0, waterIndex = -1, recorder = null, recordingName = "";
+function isRelease(c) {
+    return c.role === "release" || c.role === "control";
+}
+function chapterName(c) {
+    if (c.role === "pond") return c.panel;
+    return (c.role === "founder" || isRelease(c) ? "" : "Round " + c.round + " · ") + roles[c.role];
+}
+function random(x, y, k = 0) {
+    let n = Math.imul(x + 171, 374761393) ^ Math.imul(y + 13, 668265263) ^ Math.imul(k + 1, 982451653);
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+function paintBed(t, ox, oy, bw, bh) {
+    const grain = t.candidate ? 48 : 20, b = [], layer = document.createElement("canvas");
+    for (let y = oy; y < oy + bh; y++) {
+        for (let x = ox; x < ox + bw; x++) {
+            const cell = y * t.box[2] + x, i = cell * 5;
+            b.push(depths[cell], t.bed[i+1], t.bed[i+2], t.bed[i+3], t.bed[i+4]);
+        }
+    }
+    layer.width = bw * grain;
+    layer.height = bh * grain;
+    const g = layer.getContext("2d"), raster = g.createImageData(layer.width, layer.height), pixels = raster.data;
+    const at = (x, y) => 5 * (clamp(y, 0, bh - 1) * bw + clamp(x, 0, bw - 1));
+    const depth = i => b[i] > 0 ? b[i] : -3.4;
+    const reedBeds = reel.lesson >= 2;
+    for (let py = 0, p = 0; py < layer.height; py++) {
+        const y = (py + .5) / grain - .5, iy = Math.floor(y), fy = y - iy;
+        for (let px = 0; px < layer.width; px++, p += 4) {
+            const x = (px + .5) / grain - .5, ix = Math.floor(x), fx = x - ix;
+            const a = at(ix, iy), r = at(ix + 1, iy), u = at(ix, iy + 1), v = at(ix + 1, iy + 1);
+            const upper = mix(depth(a), depth(r), fx), lower = mix(depth(u), depth(v), fx), d = mix(upper, lower, fy);
+            const grass = mix(mix(b[a + 2], b[r + 2], fx), mix(b[u + 2], b[v + 2], fx), fy);
+            const grainNoise = (random(px + ox*grain, py + oy*grain, t.seed) - .5) * 7;
+            let red, green, blue;
+            if (d > 0) {
+                const deep = 1 - Math.exp(-d / 12), slope = clamp((lower - upper) * .85, -5, 5);
+                const band = Math.abs(d / 4 - Math.round(d / 4));
+                const contour = Math.max(0, 1 - band / .065) * 7 * Math.min(1, d / 3);
+                const sand = Math.sin((x+ox) * 1.6 + (y+oy) * 1.05 + Math.sin((y+oy) * .9)) * 1.7 + Math.cos((x+ox) * .7 - (y+oy) * 1.3) * 1.2;
+                red = mix(105, 12, deep) + sand + contour + slope - grass * .65;
+                green = mix(152, 66, deep) + sand + contour + slope;
+                blue = mix(128, 76, deep) + sand + contour + slope;
+                if (reedBeds) {
+                    red += grass * 20; green += grass * 23; blue -= grass * 15;
+                }
+            }
+            else {
+                const elevation = mix(mix(b[a + 1], b[r + 1], fx), mix(b[u + 1], b[v + 1], fx), fy);
+                const relief = clamp(elevation * .16, -8, 14) + 4 * Math.sin((x+ox) * .53 + (y+oy) * .38) + 2.4 * Math.sin((x+ox) * 2.3 - (y+oy) * .83);
+                const shore = Math.max(0, 1 + d / 3.4);
+                red = 120 + relief - grass * 3 + shore * 29;
+                green = 136 + relief - grass * 1.9 + shore * 17;
+                blue = 94 + relief - grass * 2 + shore * 14;
+            }
+            pixels[p] = red + grainNoise;
+            pixels[p + 1] = green + grainNoise;
+            pixels[p + 2] = blue + grainNoise;
+            pixels[p + 3] = 255;
+        }
+    }
+    g.putImageData(raster, 0, 0);
+    // Fixed habitat marks use the actual founding plant occupancy and water depth.
+    const ripples = [];
+    for (let y = 0; y < bh; y++)
+        for (let x = 0; x < bw; x++) {
+            const i = at(x, y), d = b[i], plants = b[i + 2], height = b[i + 3], salt = t.seed + 19;
+            const tileNoise = k => random(ox+x, oy+y, k);
+            if (d > 2 && tileNoise(salt + 70) < .42)
+                ripples.push([ox + x + .5, oy + y + .5, tileNoise(salt + 71), tileNoise(salt + 72)]);
+            if (t.candidate && d && plants) {
+                const cx = (x + .13 + .74 * tileNoise(salt+88)) * grain;
+                const cy = (y + .13 + .74 * tileNoise(salt+89)) * grain;
+                g.save();
+                g.translate(cx, cy);
+                g.rotate((tileNoise(salt+90)-.5) * Math.PI);
+                for (let k = 0; k < 5; ++k) {
+                    const lean = (k-2) * 2.5, len = 4 + tileNoise(salt+91+k) * 8;
+                    g.fillStyle = k % 2 ? "rgba(142,183,118,.31)" : "rgba(83,135,100,.55)";
+                    g.beginPath(); g.moveTo(0, 0);
+                    g.quadraticCurveTo(lean-2, -len*.43, lean+.8, -len);
+                    g.quadraticCurveTo(lean+1, -len*.49, 0, 0);
+                    g.fill();
+                }
+                g.restore();
+                continue;
+            }
+            for (let n = 0; n < 2 + plants * 2; n++) {
+                const rx = (x + tileNoise(salt + n * 3)) * grain, ry = (y + tileNoise(salt + n * 3 + 1)) * grain, h = 2 + tileNoise(salt + n * 3 + 2) * (d ? 6 : 4);
+                g.lineWidth = .65;
+                g.strokeStyle = d ? (plants ? "rgba(142,186,134,.29)" : "rgba(171,214,193,.13)") : "rgba(57,76,48,.30)";
+                g.beginPath();
+                g.moveTo(rx, ry);
+                if (plants) {
+                    g.quadraticCurveTo(rx - h * .55, ry - h * .3, rx + h * .3, ry - h);
+                    g.moveTo(rx, ry);
+                    g.lineTo(rx + h * .68, ry - h * .55);
+                }
+                else {
+                    g.quadraticCurveTo(rx + 2, ry - .45, rx + h, ry + .1);
+                }
+                g.stroke();
+            }
+            if (plants && height > 0) {
+                const cx = (x + .5) * grain, cy = (y + .56) * grain;
+                if (!d && b[i + 4]) {
+                    const radius = clamp(Math.sqrt(height) * 2.9, 6, 25);
+                    g.fillStyle = "rgba(33,51,39,.22)";
+                    g.beginPath();
+                    g.ellipse(cx + radius * .4, cy + radius * .37, radius, radius * .7, .2, 0, Math.PI * 2);
+                    g.fill();
+                    for (let k = 0; k < 8; k++) {
+                        const angle = k * 2.4, rad = radius * Math.sqrt(k / 10);
+                        const px = cx + Math.cos(angle) * rad, py = cy + Math.sin(angle) * rad * .7;
+                        g.fillStyle = k % 2 ? "#637957" : "#5c7353";
+                        g.beginPath();
+                        g.ellipse(px, py, radius * .55, radius * .44, -.3, 0, Math.PI * 2);
+                        g.fill();
+                        g.strokeStyle = "rgba(166,178,121,.36)";
+                        g.beginPath();
+                        g.arc(px, py, radius * .41, 3.5, 5.1);
+                        g.stroke();
+                    }
+                }
+                else if (d && plants >= 2) {
+                    const h = clamp(height * 1.3, 3, 13);
+                    for (let k = 0; k < 4; k++) {
+                        const lean = (k - 1.5) * 2.1, hk = h * (.60 + .4 * tileNoise(k + 10));
+                        g.beginPath();
+                        g.moveTo(cx, cy);
+                        g.quadraticCurveTo(cx - 1, cy - hk * .42, cx + lean, cy - hk);
+                        g.quadraticCurveTo(cx + lean * .48 + 1.2, cy - hk * .37, cx, cy);
+                        g.fillStyle = "rgba(110,151,107,.66)";
+                        g.fill();
+                    }
+                }
+            }
+        }
+    return {layer, ox, oy, bw, bh, ripples};
+}
+function lakeCamera(t) {
+    const [ox, oy, bw, bh] = t.box;
+    const starting = t.frames[0][6].filter(f => f[7] & 1);
+    const middle = (i) => starting.length ? starting.reduce((a, f) => a + f[i] / 256, 0) / starting.length : (i === 1 ? ox + bw / 2 : oy + bh / 2);
+    const span = (i) => starting.length ? (Math.max(...starting.map(f => f[i])) - Math.min(...starting.map(f => f[i]))) / 256 : 10;
+    const baseH = Math.min(bh - .2, (bw - .2) * H / W, Math.max(20, span(2) + 11, (span(1) + 17) * H / W));
+    return {ox, oy, bw, bh, mx: middle(1), my: middle(2), baseH};
+}
+function resetWater() {
+    depths = new Uint16Array(take.box[2] * take.box[3]);
+    for (let i = 0; i < depths.length; ++i) depths[i] = take.bed[i*5];
+    waterIndex = -1;
+    terrain = null;
+}
+function updateBed(x, y, width, height) {
+    if (waterIndex >= 0 && take.water[waterIndex][0] > state.tick) resetWater();
+    while (waterIndex + 1 < take.water.length && take.water[waterIndex + 1][0] <= state.tick) {
+        const change = take.water[++waterIndex][1];
+        for (let k = 0; k < change.length; k += 2) {
+            const cell = change[k], cx = cell % camera.bw, cy = Math.floor(cell / camera.bw);
+            depths[cell] = change[k+1];
+            if (terrain && cx >= terrain.ox && cy >= terrain.oy && cx < terrain.ox+terrain.bw && cy < terrain.oy+terrain.bh)
+                terrain = null;
+        }
+    }
+    if (terrain && x >= terrain.ox && y >= terrain.oy && x+width <= terrain.ox+terrain.bw+.001 && y+height <= terrain.oy+terrain.bh+.001)
+        return;
+    const left = Math.max(0, Math.floor(x)-6), top = Math.max(0, Math.floor(y)-6);
+    const right = Math.min(camera.bw, Math.ceil(x+width)+6), bottom = Math.min(camera.bh, Math.ceil(y+height)+6);
+    terrain = paintBed(take, left, top, right-left, bottom-top);
+}
+function updateChapter(index) {
+    state.index = index;
+    clip = reel.chapters[index];
+    take = reel.takes[clip.take];
+    state.tick = 0;
+    frameIndex = 0;
+    endTick = take.frames[take.frames.length - 1][0];
+    el("scrub").max = endTick;
+    if (clip.role === "pond") {
+        el("brain").value = String(clip.rank);
+        el("chapter").replaceChildren();
+        reel.chapters.forEach((c, i) => {
+            if (c.rank === clip.rank)
+                el("chapter").add(new Option(c.panel + " · " + reel.takes[c.take].seed, String(i)));
+        });
+    }
+    el("chapter").value = String(index);
+    el("play").textContent = state.playing ? "Pause" : "Play";
+    el("birth").hidden = !take.firstBirth;
+    el("ready").hidden = !take.candidate || !take.firstReady;
+    el("adult").hidden = !take.firstAdult;
+    el("grandchild").hidden = !take.firstGrandchild;
+    camera = lakeCamera(take);
+    resetWater();
+    state.focus = take.candidate || (take.frames[0][6].find(f => f[7] & 1) || take.frames[0][6][0] || [0])[0];
+    clock = 0;
+    draw();
+}
+function pose(a, b, k) {
+    if (!b)
+        return { a, x: a[1] / 256, y: a[2] / 256, angle: a[3] * Math.PI / 128, stride: a[8] };
+    const da = ((b[3] - a[3] + 384) % 256) - 128;
+    return { a, x: mix(a[1], b[1], k) / 256, y: mix(a[2], b[2], k) / 256, angle: (a[3] + da * k) * Math.PI / 128, stride: mix(a[8], b[8], k) };
+}
+function fish(p, focus) {
+    const a = p.a, large = !!(a[7] & 1), young = !!(a[7] & 2), hurt = !!(a[7] & 4);
+    const reference = take.candidate && !young && a[0] !== take.candidate;
+    const length = Math.max(large ? 13 : 7, a[4] / 1500 * view.s * (large ? 1.8 : 1.65));
+    const x = (p.x - view.x) * view.s, y = (p.y - view.y) * view.s, tail = Math.sin(p.stride * .065 + a[0]) * 0.12;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(p.angle);
+    ctx.scale(length, length);
+    ctx.fillStyle = "rgba(4,29,30,.32)";
+    ctx.beginPath();
+    ctx.ellipse(-.03, .12, .48, .124, 0, 0, Math.PI * 2);
+    ctx.fill();
+    const flank = ctx.createLinearGradient(0, -.18, 0, .2);
+    flank.addColorStop(0, hurt ? "#d1775c" : large && !reference ? "#b18a63" : "#6ca99c");
+    flank.addColorStop(.42, hurt ? "#ec9b78" : large && !reference ? (young ? "#dfbc83" : "#edc28b") : "#c3e3d5");
+    flank.addColorStop(1, large && !reference ? "#bc9064" : "#70aa9e");
+    ctx.beginPath();
+    ctx.moveTo(-.25, 0);
+    ctx.lineTo(-.61, -.19 + tail);
+    ctx.quadraticCurveTo(-.53, tail, -.64, .2 + tail);
+    ctx.closePath();
+    ctx.fillStyle = large && !reference ? "#9e7956" : "#6e9990";
+    ctx.strokeStyle = large ? "#695747" : "#406860";
+    ctx.lineWidth = .025;
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(.17, .1);
+    ctx.quadraticCurveTo(.08, .33, -.07, .32);
+    ctx.lineTo(-.02, .08);
+    ctx.moveTo(.11, -.09);
+    ctx.quadraticCurveTo(.03, -.3, -.12, -.28);
+    ctx.lineTo(-.04, -.06);
+    ctx.fillStyle = large && !reference ? "#bd9063" : "#8bafa5";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(.49, 0);
+    ctx.bezierCurveTo(.46, -.14, .14, -.215, -.11, -.15);
+    ctx.quadraticCurveTo(-.27, -.1, -.38, -.043);
+    ctx.lineTo(-.39, .044);
+    ctx.bezierCurveTo(-.15, .19, .22, .224, .43, .078);
+    ctx.closePath();
+    ctx.fillStyle = flank;
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-.26, -.018);
+    ctx.quadraticCurveTo(.01, -.14, .29, -.047);
+    ctx.strokeStyle = large ? "#856348" : "#638f83";
+    ctx.lineWidth = .045;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(.21, -.119);
+    ctx.quadraticCurveTo(.13, -.01, .22, .10);
+    ctx.lineWidth = .022;
+    ctx.stroke();
+    if (large) {
+        for (let k = 0; k < 3; k++) {
+            const q = -.13 + k * .09;
+            ctx.beginPath();
+            ctx.moveTo(q, -.12);
+            ctx.lineTo(q + .04, -.043);
+            ctx.strokeStyle = "#b48559";
+            ctx.stroke();
+        }
+    }
+    ctx.fillStyle = "#192d29";
+    for (const side of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(.343, side * .066, .026, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    if (take.candidate && !young && a[9] < 6 && take.frames[frameIndex][8][a[0]-1] > 0) {
+        ctx.beginPath();
+        ctx.arc(.48, 0, .07 + a[9] * .024, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(217,241,180,.75)";
+        ctx.lineWidth = 1.5 / length;
+        ctx.stroke();
+    }
+    if (focus && !state.clean) {
+        ctx.strokeStyle = "rgba(247,222,166,.85)";
+        ctx.lineWidth = 1.25 / length;
+        for (const start of [.15, Math.PI + .15]) {
+            ctx.beginPath();
+            ctx.arc(0, 0, .77, start, start + 1.05);
+            ctx.stroke();
+        }
+    }
+    ctx.restore();
+}
+function label(text, x, y, size = 14, color = "#ecf1e7", font = sans, weight = 500, align = "left") {
+    ctx.textAlign = align;
+    ctx.font = weight + " " + size + "px " + font;
+    ctx.fillStyle = color;
+    ctx.fillText(text, x, y);
+    ctx.textAlign = "left";
+}
+function bar(x, y, width, value, max, threshold, color) {
+    ctx.fillStyle = "rgba(225,238,215,.22)";
+    ctx.fillRect(x, y, width, 4);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, width * clamp(value / max, 0, 1), 4);
+    ctx.fillStyle = "#f2ebce";
+    ctx.fillRect(x + width * threshold / max, y - 2, 1, 8);
+}
+function pondOverlay(f) {
+    const atBirth = !!take.firstBirth && f[0] === take.firstBirth;
+    const finished = f[0] === endTick;
+    const shadow = ctx.createLinearGradient(0, 0, 0, H);
+    shadow.addColorStop(0, "rgba(5,24,25,.82)");
+    shadow.addColorStop(.23, "rgba(5,24,25,0)");
+    shadow.addColorStop(.65, "rgba(5,24,25,0)");
+    shadow.addColorStop(1, "rgba(5,24,25,.94)");
+    ctx.fillStyle = shadow;
+    ctx.fillRect(0, 0, W, H);
+    label(clip.panel.toUpperCase() + "  /  SEED " + take.seed, 38, 43, 15, "#d9d7b3", mono);
+    const brainLabel = reel.lesson === 2 ? "Slot " + clip.rank + " · " : "Brain ";
+    label(brainLabel + take.brain.slice(0, 8), 36, 86, 36, "#f3f1e6", '"Instrument Serif",Georgia,serif');
+    const candidate = f[6].find(a => a[0] === take.candidate);
+    const partner = f[6].find(a => a[0] === 3 - take.candidate);
+    const distance = candidate && partner ? Math.hypot(candidate[1]-partner[1], candidate[2]-partner[2]) / 256 : null;
+    let event = atBirth ? "Birth · tick " + f[0] : finished ? "Trial ended" : distance !== null && distance < 1.25 ? "In mating range" : "Apart";
+    if (take.family) {
+        if (take.firstGrandchild && f[0] === take.firstGrandchild) event = "First grandchild";
+        else if (take.firstAdult && f[0] === take.firstAdult) event = "First adult offspring";
+        else if (finished && !take.firstGrandchild) event = "Family trial ended";
+        label(f[9] + "/" + take.reedCells + " food cells stocked", 38, 118, 18, "#deeadc", mono);
+    }
+    label(event, W-38, 53, 26, atBirth ? "#f4d08c" : "#e9eee2", sans, 550, "right");
+    if (distance !== null) label(distance.toFixed(2) + " cells apart", W-38, 82, 16, "#c5d7ce", mono, 400, "right");
+    const readout = [];
+    [candidate, partner].forEach((a, i) => {
+        if (!a) return;
+        const x = i ? W/2 + 28 : 38, tint = i ? "#a4d6c4" : "#efc48d";
+        const bites = f[8][a[0]-1], eating = bites > 0 && a[9] < 5;
+        const drive = atBirth ? f[8][a[0]+1] : a[6];
+        const name = i ? (reel.lesson === 3 ? "Mate" : "Reference") : "Candidate";
+        label(name, x, H-95, 24, tint, sans, 600);
+        label((eating ? "Feeding  ·  " : "") + bites + (bites === 1 ? " bite" : " bites"), x+155, H-95, 16, "#deeadc", mono);
+        const energy = a[10] / 10;
+        label("Energy", x, H-58, 17);
+        bar(x+136, H-65, 185, energy, 100, 62.5, "#a5ca94");
+        label(energy.toFixed(1) + "%", x+335, H-58, 16, "#e2e9dc", mono);
+        label(atBirth ? "Drive at mating" : "Mating drive", x, H-28, 17);
+        bar(x+136, H-35, 185, drive, 255, 200, tint);
+        label(drive + (drive >= 200 ? "  Ready" : " / 200"), x+335, H-28, 16, tint, mono);
+        readout.push(name + " energy " + energy + "%, drive " + drive + ", bites " + bites);
+    });
+    el("pondReadout").value = event + ". " + readout.join(". ");
+}
+function draw() {
+    const frames = take.frames;
+    while (frameIndex + 1 < frames.length && frames[frameIndex + 1][0] <= state.tick)
+        frameIndex++;
+    while (frameIndex > 0 && frames[frameIndex][0] > state.tick)
+        frameIndex--;
+    const f = frames[frameIndex], n = frames[Math.min(frameIndex + 1, frames.length - 1)];
+    const alpha = clamp((state.tick - f[0]) / Math.max(1, n[0] - f[0]), 0, 1);
+    const next = new Map(n[6].map(b => [b[0], b])), actors = f[6].map(a => pose(a, next.get(a[0]), alpha));
+    let tracked = actors.find(p => p.a[0] === state.focus);
+    if (!tracked) {
+        tracked = actors.find(p => p.a[7] & 1) || actors[0];
+        state.focus = tracked ? tracked.a[0] : 0;
+    }
+    const close = el("lens").value === "follow" && tracked;
+    const bh = camera.baseH * (close ? .60 : 1), bw = bh * W / H;
+    const cx = clamp(close ? tracked.x : camera.mx, bw / 2, camera.bw - bw / 2);
+    const cy = clamp(close ? tracked.y : camera.my, bh / 2, camera.bh - bh / 2);
+    view = { x: cx - bw / 2, y: cy - bh / 2, s: H / bh, actors };
+    updateBed(view.x,view.y,bw,bh);
+    ctx.drawImage(terrain.layer, (terrain.ox - view.x) * view.s, (terrain.oy - view.y) * view.s, terrain.bw * view.s, terrain.bh * view.s);
+    ctx.lineWidth = .9;
+    for (const [x, y, seed, size] of terrain.ripples) {
+        if (x < view.x || y < view.y || x > view.x + bw || y > view.y + bh)
+            continue;
+        const phase = (state.tick / 135 + seed) % 1, glint = Math.sin(phase * Math.PI) ** 2;
+        const px = (x - view.x + (phase - .5) * .48) * view.s, py = (y - view.y) * view.s, len = (.16 + size * .29) * view.s;
+        ctx.strokeStyle = "rgba(210,232,206," + (.12 * glint) + ")";
+        ctx.beginPath();
+        ctx.moveTo(px - len * .5, py + 1);
+        ctx.quadraticCurveTo(px, py - 2, px + len * .5, py);
+        ctx.stroke();
+    }
+    for (const c of f[7]) {
+        const x = (c[0] / 256 - view.x) * view.s, y = (c[1] / 256 - view.y) * view.s, l = Math.max(6, c[2] / 1500 * view.s);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(c[3] * Math.PI / 128);
+        ctx.strokeStyle = "rgba(227,218,177,.75)";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(-l * .5, 0);
+        ctx.lineTo(l * .44, 0);
+        for (let s = -.25; s < .3; s += .18) {
+            ctx.moveTo(s * l, -l * .10);
+            ctx.lineTo((s + .07) * l, 0);
+            ctx.lineTo(s * l, l * .1);
+        }
+        ctx.stroke();
+        ctx.restore();
+    }
+    for (const p of actors)
+        if (!(p.a[7] & 1))
+            fish(p, p === tracked);
+    for (const p of actors)
+        if (p.a[7] & 1)
+            fish(p, p === tracked);
+    if (!state.clean && take.candidate) pondOverlay(f);
+    else if (!state.clean) {
+        const shadow = ctx.createLinearGradient(0, 0, 0, H);
+        shadow.addColorStop(0, "rgba(7,27,29,.77)");
+        shadow.addColorStop(.28, "rgba(7,27,29,0)");
+        shadow.addColorStop(.68, "rgba(7,27,29,0)");
+        shadow.addColorStop(1, "rgba(7,27,29,.83)");
+        ctx.fillStyle = shadow;
+        ctx.fillRect(0, 0, W, H);
+        const phase = isRelease(clip) ? "HELD-OUT RELEASE" : clip.round ? "SELECTION ROUND " + String(clip.round).padStart(2, "0") : "FOUNDER BASELINE";
+        label(phase + "   /   SEED " + take.seed, 36, 43, 15, "#e8cb91", mono, 600);
+        label(roles[clip.role], 34, 93, 40, "#f4f3e9", '"Instrument Serif",Georgia,serif', 500);
+        let family = "Brain " + take.brain.slice(0, 8);
+        if (!isRelease(clip) && clip.birthMaps >= 0)
+            family += "  /  births on " + clip.birthMaps + " of 3 training seeds";
+        if (clip.role === "challenger")
+            family += "  /  retained " + clip.winner.slice(0, 8);
+        label(family, 37, 120, 14, "#c6d8ca", mono);
+        const counts = [["LARGE SWIMMERS", f[1]], ["SMALL FISH", f[2]], ["LARGE YOUNG BORN", f[4]]];
+        counts.forEach(([name, value], i) => {
+            const x = W - 38 - (2 - i) * 153;
+            label(name, x, 44, 13, "#d0dfd1", mono, 500, "right");
+            label(String(value), x, 84, 34, "#f2f2e5", sans, 500, "right");
+        });
+        if (tracked) {
+            const a = tracked.a;
+            label((a[7] & 1 ? "LARGE SWIMMER" : "SMALL FISH") + "  #" + a[0] + (a[7]&16 ? "  /  WATER" : "  /  LAND"), 37, H - 83, 15, "#efcd91", mono, 600);
+            label("Energy", 37, H - 52, 15);
+            bar(100, H - 59, 112, a[5], 100, 62.5, "#b6d69d");
+            label(a[5] + "%", 222, H - 52, 14, "#e4ebd8", mono);
+            label("Drive", 37, H - 26, 15);
+            bar(100, H - 33, 112, a[6], 255, 200, "#e1ad70");
+            label(a[6] + "/255", 222, H - 26, 14, "#e4ebd8", mono);
+        }
+        label(f[3] + " ready to mate   ·   " + f[5] + " kills", W - 38, H - 54, 19, "#eef1df", sans, 500, "right");
+        label("Day " + (1 + Math.floor(state.tick / 240)) + "  /  Tick " + Math.floor(state.tick), W - 38, H - 27, 14, "#cdded1", mono, 400, "right");
+    }
+    el("scrub").value = Math.floor(state.tick);
+    el("time").value = "Tick " + Math.floor(state.tick);
+}
+function playback(now) {
+    const dt = clock ? Math.min((now - clock) / 1000, .15) : 0;
+    clock = now;
+    if (state.playing) {
+        state.tick += dt * 42 * Number(el("speed").value);
+        if (state.tick > endTick) {
+            if (take.candidate) {
+                state.tick = endTick;
+                togglePlay();
+                el("play").textContent = "Replay";
+                draw();
+            } else updateChapter((state.index + 1) % reel.chapters.length);
+        }
+        else
+            draw();
+    }
+    requestAnimationFrame(playback);
+}
+function togglePlay() {
+    if (!state.playing && take.candidate && state.tick >= endTick) state.tick = 0;
+    state.playing = !state.playing;
+    state.followLive = state.playing;
+    el("play").textContent = state.playing ? "Pause" : "Play";
+    clock = 0;
+}
+function toggleClean() {
+    state.clean = !state.clean;
+    el("clean").setAttribute("aria-pressed", String(state.clean));
+    el("player").classList.toggle("clean", state.clean);
+    draw();
+}
+async function fullscreen() {
+    try {
+        if (document.fullscreenElement)
+            await document.exitFullscreen();
+        else
+            await el("player").requestFullscreen();
+    }
+    catch {
+        el("message").textContent = "Full-screen playback is unavailable in this window.";
+    }
+}
+function record() {
+    if (recorder) {
+        recorder.stop();
+        return;
+    }
+    if (!canvas.captureStream || typeof MediaRecorder === "undefined") {
+        el("message").textContent = "This browser cannot record a canvas. Open the reel in Chrome or Edge to record.";
+        return;
+    }
+    const mime = ["video/mp4;codecs=avc1.42E01E", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"].find(t => MediaRecorder.isTypeSupported(t));
+    if (!mime) {
+        el("message").textContent = "This browser has no supported video encoder.";
+        return;
+    }
+    let stream;
+    try {
+        stream = canvas.captureStream(30);
+        const capture = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6500000 });
+        const chunks = [];
+        capture.ondataavailable = e => {
+            if (e.data.size)
+                chunks.push(e.data);
+        };
+        const recordingPrefix = take.candidate ? "PetriHD-lesson" + (reel.lesson || 1) + "-" + take.brain.slice(0,8) : "PetriHD-nursery";
+        recordingName = recordingPrefix + "-" + take.seed + "-tick-" + Math.floor(state.tick) + (mime.includes("mp4") ? ".mp4" : ".webm");
+        capture.onstop = () => {
+            stream.getTracks().forEach(t => t.stop());
+            recorder = null;
+            el("record").classList.remove("recording");
+            el("record").textContent = "Record clip";
+            if (!chunks.length) {
+                el("message").textContent = "The encoder returned an empty clip.";
+                return;
+            }
+            const url = URL.createObjectURL(new Blob(chunks, { type: mime })), a = document.createElement("a");
+            a.href = url;
+            a.download = recordingName;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 30000);
+            el("message").textContent = "Saved " + recordingName;
+        };
+        capture.onerror = () => {
+            el("message").textContent = "Video recording failed in this browser.";
+        };
+        capture.start(500);
+        recorder = capture;
+        el("record").classList.add("recording");
+        el("record").textContent = "Save clip";
+        if (!state.playing)
+            togglePlay();
+        el("message").textContent = "Recording 1280 × 720 at 30 fps. Select Save clip to finish.";
+    }
+    catch (e) {
+        if (stream)
+            stream.getTracks().forEach(t => t.stop());
+        el("message").textContent = "Could not start recording: " + e.message;
+    }
+}
+el("play").onclick = togglePlay;
+el("clean").onclick = toggleClean;
+el("full").onclick = fullscreen;
+el("record").onclick = record;
+el("chapter").onchange = () => {
+    state.followLive = false;
+    updateChapter(Number(el("chapter").value));
+};
+el("brain").onchange = () => {
+    state.followLive = false;
+    updateChapter(reel.chapters.findIndex(c => c.rank === Number(el("brain").value)));
+};
+function seekPondEvent(tick) {
+    if (state.playing) togglePlay();
+    state.followLive = false;
+    state.tick = tick;
+    el("play").textContent = tick === endTick ? "Replay" : "Play";
+    draw();
+}
+el("ready").onclick = () => seekPondEvent(take.firstReady);
+el("adult").onclick = () => seekPondEvent(take.firstAdult);
+el("grandchild").onclick = () => seekPondEvent(take.firstGrandchild);
+el("birth").onclick = () => {
+    if (take.candidate) { seekPondEvent(take.firstBirth); return; }
+    const first = take.frames.find(f => f[4] > 0), child = first && first[6].find(a => (a[7] & 3) === 3);
+    if (!child)
+        return;
+    state.focus = child[9] || child[0];
+    state.tick = Math.max(0, take.firstBirth - 84);
+    state.followLive = false;
+    el("lens").value = "follow";
+    draw();
+};
+el("lens").onchange = draw;
+el("scrub").oninput = () => {
+    state.followLive = false;
+    state.tick = Number(el("scrub").value);
+    if (take.candidate && !state.playing) el("play").textContent = state.tick === endTick ? "Replay" : "Play";
+    draw();
+};
+canvas.addEventListener("click", e => {
+    const rect = canvas.getBoundingClientRect(), x = (e.clientX - rect.left) * W / rect.width, y = (e.clientY - rect.top) * H / rect.height;
+    let closest = 40 * 40, chosen = null;
+    for (const p of view.actors) {
+        const dx = (p.x - view.x) * view.s - x, dy = (p.y - view.y) * view.s - y, d = dx * dx + dy * dy;
+        if (d < closest) {
+            closest = d;
+            chosen = p;
+        }
+    }
+    if (chosen) {
+        state.focus = chosen.a[0];
+        draw();
+    }
+});
+document.addEventListener("keydown", e => {
+    if (e.repeat || e.altKey || e.ctrlKey || e.metaKey || e.target.matches("input,select"))
+        return;
+    if (e.code === "Space" && e.target.matches("button"))
+        return;
+    if (e.code === "Space") {
+        e.preventDefault();
+        togglePlay();
+    }
+    else if (e.key.toLowerCase() === "c")
+        toggleClean();
+    else if (e.key.toLowerCase() === "f")
+        fullscreen();
+    else if (e.key.toLowerCase() === "r" && recorder)
+        record();
+});
+window.nurseryUpdate = (session, count) => {
+    if (session !== reel.session || count <= reel.chapters.length)
+        return;
+    if (state.followLive && !recorder) {
+        location.replace(location.href.split("#")[0] + "#chapter=" + reel.chapters.length);
+        location.reload();
+    }
+    else
+        el("message").textContent = "A new training round is available. Reload to watch it.";
+};
+if (reel) {
+    if (reel.chapters[0].role === "pond") {
+        const title = reel.lesson === 3 ? "Selective breeding · Roaming pairs" : reel.lesson === 2 ? "Lesson 2 · Reed patches" : "Lesson 1 · Breeding pond";
+        document.title = reel.lesson >= 2 ? title + " · PetriHD" : "Lesson 1 · PetriHD breeding pond";
+        document.querySelector("h1").textContent = title;
+        canvas.setAttribute("aria-label", "Training pond replay with two swimmers. Energy, bites and mating drive for both appear below.");
+        el("brainField").hidden = false;
+        const ranks = new Set();
+        for (const c of reel.chapters) if (!ranks.has(c.rank)) {
+            const prefix = reel.lesson === 2 ? "Slot " + c.rank + " · " : "";
+            const name = reel.lesson === 3 ? c.result : prefix + reel.takes[c.take].brain.slice(0,8) + " · " + c.result;
+            el("brain").add(new Option(name, c.rank));
+            ranks.add(c.rank);
+        }
+        if (reel.lesson === 3) el("brainField").firstChild.textContent = "Refill interval ";
+        el("lens").options[0].text = "Pond";
+    } else reel.chapters.forEach((c, i) => {
+        el("chapter").add(new Option(chapterName(c) + " · " + reel.takes[c.take].seed, i));
+    });
+    const initial = Number(new URLSearchParams(location.hash.slice(1)).get("chapter"));
+    updateChapter(Number.isInteger(initial) ? clamp(initial, 0, reel.chapters.length - 1) : 0);
+    if (!reel.complete)
+        setInterval(() => {
+            const s = document.createElement("script");
+            s.src = "nursery-live.js?v=" + Date.now();
+            s.onload = s.onerror = () => s.remove();
+            document.head.appendChild(s);
+        }, 4000);
+    requestAnimationFrame(playback);
+}
+else {
+    el("message").textContent = "Run petrihd-nursery train with --visual to record trials.";
+}
+</script></body></html>
