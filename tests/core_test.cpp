@@ -1,12 +1,14 @@
 #include <cinttypes>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "file.hpp"
 #include "fnv.hpp"
 #include "png.hpp"
 #include "random.hpp"
+#include "taxonomy.hpp"
 #include "world.hpp"
 
 namespace {
@@ -194,6 +196,12 @@ void test_save_round_trip() {
     phd::World loaded(phd::WorldConfig{});
     CHECK(loaded.load(saved.data(), saved.size()));
     CHECK(loaded.fingerprint() == world.fingerprint());
+    for (int ny = 0; ny < world.nodes_y(); ++ny) {
+        for (int nx = 0; nx < world.nodes_x(); ++nx) {
+            CHECK(loaded.rain(nx, ny) == world.rain(nx, ny));
+            CHECK(loaded.cloud(nx, ny) == world.cloud(nx, ny));
+        }
+    }
     for (int i = 0; i < 300; ++i) {
         world.step();
         loaded.step();
@@ -229,7 +237,317 @@ void test_files() {
 // The fingerprint after 2,400 ticks on seed 1. It must match on every
 // platform and build (x86, aarch64, NEON or not). If a change to the world is
 // meant to change it, update it in the same commit and say why.
-constexpr std::uint64_t golden_seed1_t2400 = 0x6d5dc4b7a824c293ull;
+// Joined river reaches now flood enclosed low ground and can back up into
+// ponds. The new water coverage and depth also change plant growth.
+constexpr std::uint64_t golden_seed1_t2400 = 0x46926542209791dcull;
+
+// Animals: bodies from organs, each keeping to where its body can live,
+// feeding, and the same on every run and after a save.
+// These two controls measure grazing and inheritance from identical founders.
+// Predatory founders and feeding from a kill have their own contact tests.
+void seed_grazers(phd::World& world) {
+    world.seed_animals(56);
+    for (std::size_t k = 0; k < world.animals().size(); ++k) {
+        if (world.animals()[k].stock == phd::FishStock::large_swimmer) {
+            const_cast<phd::brain::Brain&>(world.brain_of(k)) = phd::brain::founder();
+        }
+    }
+}
+
+void test_animals() {
+    using namespace phd;
+    // What the organs add up to.
+    AnimalGenome legs{}, fins{}, wings{};
+    legs.gene[agene_size] = 100, legs.gene[agene_legs] = 140, legs.gene[agene_leg_length] = 200;
+    fins.gene[agene_size] = 20, fins.gene[agene_fins] = 200, fins.gene[agene_tail] = 170, fins.gene[agene_gills] = 255;
+    wings.gene[agene_size] = 38, wings.gene[agene_legs] = 80, wings.gene[agene_wings] = 200;
+    const Frame walker = frame(legs), swimmer = frame(fins), flier = frame(wings);
+    CHECK(walker.land_speed > walker.water_speed && walker.air_speed == 0 && walker.breathes_air && !walker.breathes_water);
+    CHECK(swimmer.water_speed > swimmer.land_speed && swimmer.breathes_water && !swimmer.breathes_air);
+    CHECK(flier.air_speed > flier.land_speed);
+    AnimalGenome heavy = wings;
+    heavy.gene[agene_size] = 200, heavy.gene[agene_build] = 200;
+    CHECK(frame(heavy).air_speed == 0); // wings too small for the body do not lift it
+    CHECK(frame(heavy).upkeep > flier.upkeep);
+    // A newborn is the same body, smaller, and cheaper to keep.
+    CHECK(frame(legs, newborn_growth).mass * 8 < walker.mass && frame(legs, newborn_growth).upkeep < walker.upkeep);
+    // Unlike bodies cannot breed; near ones can.
+    AnimalGenome cousin = legs;
+    cousin.gene[agene_size] += 10, cousin.gene[agene_hue] += 20;
+    CHECK(genetic_distance(legs, fins) > breeding_distance && genetic_distance(legs, cousin) <= breeding_distance);
+
+    WorldConfig config;
+    config.width = 128;
+    config.height = 96;
+    config.layout = Layout::development;
+    World world(config), twin(config);
+    const auto empty = world.fingerprint();
+    seed_grazers(world);
+    seed_grazers(twin);
+    // Exercise takeoff even when every flier spawns within sight of grazing.
+    // The decision to fly over barren ground is tested in test_brains.
+    for (World* start : {&world, &twin}) {
+        for (const auto& a : start->animals()) {
+            if (frame(a.genome).air_speed) {
+                const_cast<Animal&>(a).wants |= wants_fly;
+                break;
+            }
+        }
+    }
+    CHECK(world.animals().size() >= 40);
+    CHECK(world.fingerprint() != empty);
+    const auto founders = world.animals().size();
+    bool flew = false;
+    for (int t = 0; t < 12 * World::ticks_per_day; ++t) {
+        world.step();
+        twin.step();
+        if (t % 60 == 0) {
+            for (const Animal& a : world.animals()) {
+                flew = flew || Medium(a.medium) == Medium::air;
+            }
+        }
+    }
+    CHECK(world.fingerprint() == twin.fingerprint());
+    int fish = 0, stranded = 0, fed = 0, walkers = 0, drowning = 0, born = 0, juveniles = 0, parents = 0;
+    for (const Animal& a : world.animals()) {
+        const Frame f = frame(a.genome, a.growth);
+        born += a.mother != 0;
+        juveniles += a.growth < 255;
+        parents += a.young > 0;
+        if (a.mother) {
+            CHECK(a.father != 0 && a.father != a.mother && a.growth >= newborn_growth);
+        }
+        const auto cell = std::size_t(a.y >> 8) * config.width + std::size_t(a.x >> 8);
+        const bool wet = world.water(cell) != Water::none;
+        if (!f.breathes_air) {
+            ++fish;
+            stranded += !wet;
+        } else if (!f.air_speed) {
+            ++walkers;
+            fed += a.energy > f.store / 4;
+            drowning += a.breath < breath_ticks / 2;
+        }
+    }
+    CHECK(fish > 10 && stranded * 4 <= fish);     // fish keep to the water
+    CHECK(walkers > 10 && fed * 4 >= walkers * 3); // grazers find enough to eat
+    CHECK(drowning * 4 <= walkers);                // and keep out of deep water, flood or no
+    CHECK(flew);
+    // Scent and sound: an animal with a nose smells the grazing it stands
+    // in, and something has called.
+    bool smelled = false;
+    for (std::size_t k = 0; k < world.animals().size(); ++k) {
+        smelled = smelled || world.senses(k).in[brain::self_input(brain::smell_plant)] > 0;
+    }
+    bool called = !world.calls().empty();
+    for (int t = 0; t < 400 && !called; ++t) {
+        world.step();
+        twin.step();
+        called = !world.calls().empty();
+    }
+    CHECK(smelled && called);
+    // They breed: young are born to two parents, start small and grow.
+    CHECK(born > 10 && juveniles > 0 && parents >= 2);
+    CHECK(world.animals().size() > founders && world.animals().size() < 1000);
+
+    // A save keeps them, and the world goes on the same from it.
+    const auto saved = world.save();
+    World loaded(config);
+    CHECK(loaded.load(saved.data(), saved.size()));
+    CHECK(loaded.animals().size() == world.animals().size());
+    for (int t = 0; t < 100; ++t) {
+        world.step();
+        loaded.step();
+    }
+    CHECK(loaded.fingerprint() == world.fingerprint());
+}
+
+void test_neutral_inheritance() {
+    using namespace phd;
+    WorldConfig config;
+    config.seed = 2;
+    config.width = 128;
+    config.height = 96;
+    config.layout = Layout::development;
+    World neutral(config), evolving(config);
+    neutral.set_brain_mode(BrainMode::neutral);
+    seed_grazers(neutral);
+    seed_grazers(evolving);
+    const brain::Brain founder = brain::founder();
+    bool shared_mutant = false, different_brain = false;
+    for (int t = 0; t < 3013; ++t) {
+        neutral.step();
+        if (different_brain) continue;
+        evolving.step();
+        CHECK(neutral.animals().size() == evolving.animals().size());
+        if (neutral.animals().size() != evolving.animals().size()) return;
+        for (std::size_t k = 0; k < neutral.animals().size(); ++k) {
+            const auto& child = neutral.animals()[k];
+            if (!child.mother) continue;
+            const auto& other = evolving.animals()[k];
+            CHECK(child.id == other.id && child.mother == other.mother && child.father == other.father);
+            CHECK(std::memcmp(child.genome.gene, other.genome.gene, agene_count) == 0);
+            // Identical founder brains produce the same early mutations. Once
+            // donors carry different weights, a newborn can inherit different wiring.
+            const auto& mind = neutral.brain_of(k);
+            if (std::memcmp(mind.weight, evolving.brain_of(k).weight, brain::bytes) == 0) {
+                shared_mutant |= std::memcmp(mind.weight, founder.weight, brain::bytes) != 0;
+            } else {
+                different_brain = true;
+            }
+        }
+    }
+    CHECK(shared_mutant && different_brain);
+
+    // Between two forage surveys the live plants and the sensed food differ.
+    const auto saved = neutral.save();
+    World loaded(config);
+    CHECK(loaded.load(saved.data(), saved.size()));
+    CHECK(loaded.brain_mode() == BrainMode::neutral);
+    CHECK(loaded.animals().size() == neutral.animals().size());
+    if (loaded.animals().size() != neutral.animals().size()) return;
+    for (std::size_t k = 0; k < neutral.animals().size(); ++k) {
+        const auto live = neutral.senses(k), restored = loaded.senses(k);
+        CHECK(std::memcmp(live.in, restored.in, brain::inputs) == 0);
+    }
+    for (int t = 0; t < 271; ++t) {
+        neutral.step();
+        loaded.step();
+    }
+    CHECK(loaded.save() == neutral.save());
+}
+
+// The brain: its arithmetic, how it is inherited, and the founders' reflexes.
+void test_taxonomy() {
+    using namespace phd;
+    Taxonomy taxa;
+    // The five founders are five species, and the two with fins and gills share a family.
+    Taxonomy::Place place[founder_kinds];
+    for (int k = 0; k < founder_kinds; ++k) place[k] = taxa.classify(founder_genome(FounderKind(k)));
+    CHECK(taxa.species().size() == 5);
+    CHECK(taxa.family(place[int(FounderKind::fish)]) == taxa.family(place[int(FounderKind::swimmer)]));
+    CHECK(taxa.family(place[int(FounderKind::grazer)]) != taxa.family(place[int(FounderKind::crawler)]));
+    for (int a = 0; a < founder_kinds; ++a) {
+        for (int b = 0; b < a; ++b) CHECK(taxa.name(place[a]) != taxa.name(place[b]) && taxa.common(place[a]) != taxa.common(place[b]));
+    }
+    // Founders as a world places them are their kind's species, and no new subspecies.
+    Random rng(77);
+    for (int n = 0; n < 200; ++n) {
+        const auto kind = FounderKind(n % founder_kinds);
+        const auto found = taxa.classify(varied_founder(kind, rng));
+        CHECK(found.species == place[int(kind)].species && found.subspecies == 0);
+    }
+    CHECK(taxa.species().size() == 5);
+
+    // Drift: a little is the same animal, more is a subspecies, more a species of the same genus,
+    // and far enough another genus. A changed body plan is another family at once.
+    const AnimalGenome fish = founder_genome(FounderKind::fish);
+    const auto drifted = [&](int by) {
+        AnimalGenome g = fish;
+        // Spread over genes that do not set the plan.
+        const AnimalGene over[] = {agene_size, agene_build, agene_tail, agene_fat, agene_tone, agene_eyes, agene_nose, agene_ears};
+        for (int i = 0; by > 0; ++i) {
+            const int step = std::min(by, 40);
+            g.gene[over[i % 8]] = std::uint8_t(g.gene[over[i % 8]] + step);
+            by -= step;
+        }
+        return g;
+    };
+    const auto home = place[int(FounderKind::fish)];
+    CHECK(taxa.find(drifted(40)).species == home.species && taxa.find(drifted(40)).subspecies == 0);
+    const auto race = taxa.classify(drifted(200));
+    CHECK(race.species == home.species && race.subspecies == 1 && taxa.name(race) != taxa.name(home));
+    const auto cousin = taxa.classify(drifted(300));
+    CHECK(cousin.species != home.species && taxa.species()[std::size_t(cousin.species)].genus == taxa.species()[std::size_t(home.species)].genus);
+    CHECK(taxa.species()[std::size_t(cousin.species)].parent == home.species);
+    // A body plan changes a family when the lineage has become a species of its own:
+    // one fish with legs is still a fish.
+    AnimalGenome legged = fish;
+    legged.gene[agene_legs] = 140;
+    CHECK(taxa.find(legged).species == home.species);
+    legged.gene[agene_size] = 200;
+    const auto walker = taxa.classify(legged);
+    CHECK(walker.species != home.species && taxa.family(walker) != taxa.family(home));
+    // A taxonomy only watches: the same genomes in the same order give the same names.
+    Taxonomy again;
+    for (int k = 0; k < founder_kinds; ++k) CHECK(again.name(again.classify(founder_genome(FounderKind(k)))) == taxa.name(place[k]));
+}
+
+void test_brains() {
+    using namespace phd;
+    using namespace phd::brain;
+    const Brain wired = founder();
+    Senses calm{};
+    calm.in[self_input(self_energy)] = 120;
+    CHECK(think(calm, wired).turn == 0 && !think(calm, wired).eat && !think(calm, wired).mate);
+    Senses hungry = calm;
+    hungry.in[self_input(self_energy)] = 40;
+    CHECK(think(hungry, wired).eat);
+    Senses grazing = hungry;
+    grazing.in[sector_input(right, in_food)] = 80;
+    CHECK(think(grazing, wired).turn > 0);
+    grazing.in[sector_input(right, in_food)] = 0, grazing.in[sector_input(left, in_food)] = 80;
+    CHECK(think(grazing, wired).turn < 0);
+    Senses blocked = calm;
+    blocked.in[self_input(self_ahead_hazard)] = 127;
+    CHECK(think(blocked, wired).turn > 0 && think(blocked, wired).pace < think(calm, wired).pace);
+    Senses ready = calm;
+    ready.in[self_input(self_drive)] = 127, ready.in[sector_input(far_left, in_mate)] = 100;
+    CHECK(think(ready, wired).mate && think(ready, wired).turn < 0);
+    CHECK(think(ready, wired).call && !think(calm, wired).call); // ready to mate, it calls
+    // It turns toward a mate's scent, and toward a call in a voice like its own.
+    Senses scented = calm;
+    scented.in[self_input(smell_mate_right)] = 60;
+    CHECK(think(scented, wired).turn > 0);
+    Senses hearing = calm;
+    hearing.in[self_input(heard_right)] = -80;
+    CHECK(think(hearing, wired).turn < 0);
+    Senses barren = hungry;
+    CHECK(think(barren, wired).fly); // nothing to eat in sight: one with wings would take off
+    barren.in[self_input(self_food)] = 100;
+    CHECK(!think(barren, wired).fly);
+
+    // A child takes each hidden unit whole from one parent or the other.
+    Brain a{}, b{}, child{};
+    std::fill(std::begin(a.weight), std::end(a.weight), std::int8_t(1));
+    std::fill(std::begin(b.weight), std::end(b.weight), std::int8_t(2));
+    std::uint32_t state = 12345;
+    combine(child, a, b, state);
+    int from_b = 0;
+    for (int h = 0; h < hidden; ++h) {
+        const std::int8_t first = child.weight[h * unit_bytes];
+        from_b += first == 2;
+        for (int i = 0; i < unit_bytes; ++i) {
+            CHECK(child.weight[h * unit_bytes + i] == first);
+        }
+        for (int o = 0; o < outputs; ++o) {
+            CHECK(child.weight[hidden * unit_bytes + o * output_bytes + h] == first);
+        }
+    }
+    CHECK(from_b > 2 && from_b < hidden - 2);
+    // Mutation touches about one weight in 128, by a little.
+    Brain mutant = wired;
+    int changes = 0;
+    for (int k = 0; k < 64; ++k) {
+        Brain copy = wired;
+        changes += mutate(copy, state);
+        mutant = copy;
+    }
+    CHECK(changes > 64 * bytes / 128 / 2 && changes < 64 * bytes / 128 * 2);
+    int moved = 0;
+    for (int i = 0; i < bytes; ++i) {
+        CHECK(std::abs(mutant.weight[i] - wired.weight[i]) <= 4);
+        moved += mutant.weight[i] != wired.weight[i];
+    }
+    CHECK(moved > 0);
+    // The shuffled control keeps every weight and loses the wiring.
+    Brain scrambled = wired;
+    shuffle(scrambled, state);
+    long sum = 0, sum_wired = 0;
+    for (int i = 0; i < bytes; ++i) {
+        sum += scrambled.weight[i], sum_wired += wired.weight[i];
+    }
+    CHECK(sum == sum_wired && std::memcmp(scrambled.weight, wired.weight, bytes) != 0);
+}
 
 void test_golden() {
     const auto value = run(1, 2400).fingerprint();
@@ -247,6 +565,10 @@ int main() {
     test_plants_and_fire();
     test_save_round_trip();
     test_files();
+    test_animals();
+    test_taxonomy();
+    test_brains();
+    test_neutral_inheritance();
     test_golden();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);

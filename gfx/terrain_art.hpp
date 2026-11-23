@@ -25,7 +25,7 @@ Sun sun_for(const phd::World& world);
 // crowns (it stands real trees in their places), with forest floor where the
 // crowns were.
 void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
-          bool flat = true);
+          bool flat = true, bool tree_xray = false);
 
 // The tree filling a cell, if any, as both views draw it: where it stands,
 // its size, its colour this season. From the plant itself.
@@ -35,6 +35,12 @@ struct Tree {
     std::uint8_t r = 0, g = 0, b = 0; // canopy colour, with the season
     bool conifer = false;
     bool bare = false;              // deciduous, in winter
+    std::uint8_t form = 0;          // a broadleaf crown's outline: art::sprites::Form
+    bool pale = false;              // white bark
+    bool snag = false;              // dead: a trunk and the stubs of its limbs, with other plants under it
+    // How far its limbs reach: a snag keeps the radius its crown had, for the
+    // girth of its trunk, but only stubs of the limbs.
+    float reach() const { return snag ? radius * 0.4f : radius; }
     std::uint32_t id = 0;           // the plant
 };
 Tree tree_in(const phd::World& world, int cx, int cy);

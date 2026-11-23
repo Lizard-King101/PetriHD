@@ -22,18 +22,22 @@ using GLsizeiptr = std::ptrdiff_t;
 constexpr GLenum TRIANGLES = 0x0004;
 constexpr GLenum LESS = 0x0201, LEQUAL = 0x0203;
 constexpr GLenum DEPTH_TEST = 0x0B71;
+constexpr GLenum DITHER = 0x0BD0;
+constexpr GLenum ALPHA_BITS = 0x0D55;
+constexpr GLenum MAX_TEXTURE_SIZE = 0x0D33, MAX_RENDERBUFFER_SIZE = 0x84E8;
 constexpr GLbitfield DEPTH_BUFFER_BIT = 0x0100;
-constexpr GLenum SRC_ALPHA = 0x0302, ONE_MINUS_SRC_ALPHA = 0x0303;
+constexpr GLenum ZERO = 0, ONE = 1, SRC_ALPHA = 0x0302, ONE_MINUS_SRC_ALPHA = 0x0303, DST_ALPHA = 0x0304, DST_COLOR = 0x0306;
 constexpr GLenum BLEND = 0x0BE2;
 constexpr GLenum UNPACK_ALIGNMENT = 0x0CF5, PACK_ALIGNMENT = 0x0D05;
 constexpr GLenum TEXTURE_2D = 0x0DE1;
-constexpr GLenum UNSIGNED_BYTE = 0x1401, UNSIGNED_SHORT = 0x1403, FLOAT = 0x1406;
-constexpr GLenum RGB = 0x1907, RGBA = 0x1908;
+constexpr GLenum BYTE = 0x1400, UNSIGNED_BYTE = 0x1401, UNSIGNED_SHORT = 0x1403, FLOAT = 0x1406;
+constexpr GLenum UNSIGNED_SHORT_4_4_4_4 = 0x8033;
+constexpr GLenum RGB = 0x1907, RGBA = 0x1908, LUMINANCE_ALPHA = 0x190A;
 constexpr GLenum VERSION = 0x1F02, EXTENSIONS = 0x1F03;
-constexpr GLenum NEAREST = 0x2600, LINEAR = 0x2601;
+constexpr GLenum NEAREST = 0x2600, LINEAR = 0x2601, LINEAR_MIPMAP_LINEAR = 0x2703;
 constexpr GLenum TEXTURE_MAG_FILTER = 0x2800, TEXTURE_MIN_FILTER = 0x2801;
 constexpr GLenum TEXTURE_WRAP_S = 0x2802, TEXTURE_WRAP_T = 0x2803;
-constexpr GLenum CLAMP_TO_EDGE = 0x812F;
+constexpr GLenum CLAMP_TO_EDGE = 0x812F, REPEAT = 0x2901;
 constexpr GLenum TEXTURE0 = 0x84C0;
 constexpr GLenum ARRAY_BUFFER = 0x8892, ELEMENT_ARRAY_BUFFER = 0x8893, STREAM_DRAW = 0x88E0, STATIC_DRAW = 0x88E4,
                  DYNAMIC_DRAW = 0x88E8;
@@ -58,6 +62,8 @@ constexpr GLenum DEPTH_COMPONENT16 = 0x81A5, DEPTH_COMPONENT24 = 0x81A6, FRAMEBU
     X(void, RenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei))                         \
     X(void, BindTexture, (GLenum, GLuint))                                                   \
     X(void, BlendFunc, (GLenum, GLenum))                                                     \
+    X(void, BlendFuncSeparate, (GLenum, GLenum, GLenum, GLenum))                             \
+    X(void, ColorMask, (GLboolean, GLboolean, GLboolean, GLboolean))                         \
     X(void, BufferData, (GLenum, GLsizeiptr, const void*, GLenum))                           \
     X(void, Clear, (GLbitfield))                                                             \
     X(void, ClearColor, (GLfloat, GLfloat, GLfloat, GLfloat))                                \
@@ -72,6 +78,7 @@ constexpr GLenum DEPTH_COMPONENT16 = 0x81A5, DEPTH_COMPONENT24 = 0x81A6, FRAMEBU
     X(void, DrawArrays, (GLenum, GLint, GLsizei))                                            \
     X(void, Enable, (GLenum))                                                                \
     X(void, EnableVertexAttribArray, (GLuint))                                               \
+    X(void, DisableVertexAttribArray, (GLuint))                                              \
     X(void, GenBuffers, (GLsizei, GLuint*))                                                  \
     X(void, GenTextures, (GLsizei, GLuint*))                                                 \
     X(void, GetProgramInfoLog, (GLuint, GLsizei, GLsizei*, GLchar*))                         \
@@ -79,6 +86,7 @@ constexpr GLenum DEPTH_COMPONENT16 = 0x81A5, DEPTH_COMPONENT24 = 0x81A6, FRAMEBU
     X(void, GetShaderInfoLog, (GLuint, GLsizei, GLsizei*, GLchar*))                          \
     X(void, GetShaderiv, (GLuint, GLenum, GLint*))                                           \
     X(const unsigned char*, GetString, (GLenum))                                             \
+    X(void, GetIntegerv, (GLenum, GLint*))                                                   \
     X(GLint, GetUniformLocation, (GLuint, const GLchar*))                                    \
     X(void, LinkProgram, (GLuint))                                                           \
     X(void, PixelStorei, (GLenum, GLint))                                                    \
@@ -115,6 +123,6 @@ const char* shader_preamble();
 
 // Compiles and links a program, binding attributes in order. Returns 0 and
 // prints the log on failure.
-GLuint program(const char* vertex, const char* fragment, const char* const* attributes, int count);
+GLuint program(const char* vertex, const char* fragment, const char* const* attributes, int count, const char* fragment_directives = "");
 
 } // namespace gl

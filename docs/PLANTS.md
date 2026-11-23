@@ -32,6 +32,15 @@ climate and ground could support. From then on only selection decides.
   on what they stored; evergreens harden and pay half.
 - **Damage:** frost below the plant's tolerance, flooding deeper than it can
   stand, wilting when water falls short, and hunger.
+- **Water affinity.** The flood gene is how deep a plant can stand in water
+  (up to 1.6 m). Deeper than that its roots drown, however far its top is
+  above the surface, faster the deeper; so a rising lake kills the trees and
+  bushes it floods. On land a plant made for water needs wetter ground, so
+  reeds keep to the margins. Under water, light dims with the depth over a
+  plant's top. Before this, a plant taller than the water was never harmed
+  by it. Over 3 years on seeds 1, 3 and 6 this left 2-11% fewer plants and
+  10-27% fewer trees, and sharpened the split in the flood gene: 51-60 on
+  dry land against 147-174 in water, from 72-104 against 111-139.
 - **Water:** plants draw from the soil as they grow, so a forest dries the
   ground under it. Deep roots reach the water stored below.
 - **Seeds:** in spring and summer, from spare energy. Small wind-borne seeds
@@ -42,6 +51,17 @@ climate and ground could support. From then on only selection decides.
   need light.
 - **Death:** age, damage, fire. What dies becomes litter, which rots into
   nutrients faster when warm and damp, and is fuel until it does.
+- **Snags.** A tree of 5 m or more that dies of anything leaves its trunk
+  standing where it stood, and only half its mass falls as litter. A snag
+  takes no light or water and other plants grow under it. It counts as half
+  a tree when a new one looks for room: there is room beside one tree and
+  one snag, not more. It rots in about four years, sooner where it is warm
+  and damp, in about a year standing in a lake or river, and at a quarter of the
+  pace while frozen,
+  losing height as it goes, then falls as litter. A fire burns a standing snag away, and a tree that fire
+  kills leaves a new one. A tree that takes a snag's cell brings it down.
+  Over 3 years on seeds 1, 3 and 6 snags left 3-14% fewer trees than the
+  flood rules alone, with 1,257-3,298 snags standing at the end.
 - **Fire:** lightning on dry ground with fuel. Fire spreads to dry
   neighbours with fuel, faster downwind, and stops at water, bare or freshly
   burnt ground and heavy rain. Small plants die; trees with thick bark lose
@@ -66,42 +86,61 @@ smoke in both views.
 *Forests, grasslands and marshes form and shift with climate and fire, and
 plant traits differ by region.*
 
-**8 seeds, 6 years each (23,040 ticks), the default temperate climate.**
-Every seed kept 120,000–210,000 plants and 2,700–5,100 trees. Closed forest
-covered 9–17% of the land and rose and fell. Every seed had fires; on seeds
-1, 6 and 7 single fires burnt 17,000–28,000 cells (a quarter to a third of
-the valley), and seed 7's forest fell from 15% to 10% after one.
+**8 seeds, 6 years each (23,040 ticks), the default temperate climate,
+re-run on November 20, 2026 with the flood rules and snags.** Sampled at the
+end of each year, the seeds held 72,000-224,000 plants, 1,538-3,765 trees
+and 583-4,068 snags. Closed forest covered 6.5-14.7% of the land and rose
+and fell. Every seed had fires; single fires burnt 17,000-38,000 cells on
+seeds 1, 6 and 7 and about 5,000 on seeds 5 and 8. Seed 7's last-year fire
+took its forest from 13.0% to 8.1% and its trees from 2,689 to 1,578.
 
-Traits split by habitat (means of the gene, 0–255, in year 6):
+Against the run before those rules (2,700-5,100 trees, 9-17% forest), the
+forests are thinner: trees that stand in water now die, and snags hold
+half a tree's room for about four years. Seed 1, whose lakes are still
+filling, is the thinnest at 6.5-8.1% forest.
+
+Traits split by habitat (means of the gene, 0-255, in year 6):
 
 | Seed | Drought: dry land / wet land | Roots: dry / wet | Flood: wet land / in water |
 | --- | --- | --- | --- |
-| 1 | 132 / 115 | 112 / 118 | 80 / 146 |
-| 2 | 144 / 119 | 120 / 126 | 71 / 103 |
-| 3 | 145 / 117 | 111 / 134 | 55 / 146 |
-| 4 | 144 / 136 | 121 / 118 | 56 / 84 |
-| 5 | 145 / 121 | 112 / 129 | 57 / 129 |
-| 6 | 127 / 110 | 105 / 116 | 97 / 151 |
-| 7 | 122 / 102 | 97 / 109 | 99 / 127 |
-| 8 | 139 / 125 | 106 / 112 | 61 / 110 |
+| 1 | 146 / 117 | 109 / 114 | 77 / 193 |
+| 2 | 159 / 117 | 130 / 125 | 68 / 160 |
+| 3 | 150 / 116 | 114 / 131 | 59 / 187 |
+| 4 | 151 / 135 | 124 / 116 | 59 / 141 |
+| 5 | 150 / 120 | 117 / 127 | 60 / 164 |
+| 6 | 137 / 111 | 104 / 113 | 84 / 183 |
+| 7 | 142 / 118 | 114 / 128 | 63 / 161 |
+| 8 | 156 / 125 | 121 / 110 | 57 / 132 |
 
 - Plants standing in water are more flood-tolerant than those on wet land
-  on all 8 seeds.
+  on all 8 seeds, by 75-128 points; it was 28-91 before the flood rules.
 - Dry-land plants are more drought-tolerant than wet-land ones on all 8.
-- Roots are deeper on wet land on 7 of 8: deep roots reach stored water,
-  and dry land has little stored to reach, so there they are mostly a
-  cost. That wasn't designed in.
+- Roots are deeper on wet land on 5 of 8, down from 7 of 8, so that
+  pattern is weaker than it was.
 
-The three-climate runs below predate the tree spacing rule, which lowers
-forest cover; the biomes they show are unchanged.
+**The same valley (seed 1) in three climates, after 5 years.** The old sim
+is the one before the flood rules and snags, run again for this table.
 
-**The same valley (seed 1) in three climates, after 5 years:**
+| Climate | Trees, old / new | Snags | Biomes now (share of the map) |
+| --- | --- | --- | --- |
+| Cold (0 °C mean) | 1,474 / 1,112 | 5,150 | tundra 29%, bog 13%, taiga 1.1% (was 1.5%) |
+| Temperate (9 °C) | 2,929 / 1,887 | 1,831 | scrub 21%, marsh 12%, heath 8%, grassland 1.7% (was 2.8%), deciduous forest 0.9% (was 1.5%) |
+| Hot (22 °C) | 2,546 / 2,504 | 763 | scrub 23%, swamp 10%, savanna 7%, desert 4%, rainforest 0.9%, dry woodland 0.9% |
 
-| Climate | Forest | Biomes (share of the map) |
-| --- | --- | --- |
-| Cold (0 °C mean) | 14% | tundra 29%, bog 14%, taiga 2% |
-| Temperate (9 °C) | 23% | scrub 15%, marsh 13%, heath 7%, deciduous forest 6%, grassland 4% |
-| Hot (22 °C) | 20% | scrub 22%, swamp 10%, savanna 5%, desert 4%, rainforest 2%, dry woodland 2% |
+- The three climates still give three different valleys.
+- The hot valley is unchanged. The temperate one lost about a third of its
+  trees, part of it to a 21,000-cell fire the old run did not have; runs
+  diverge once the rules differ, so one seed can't separate the two.
+- The cold valley has nearly five snags to a living tree at year 5. They
+  are the founding trees: 4,587 had already died by year 2, and in the cold
+  a snag stands for six years or more. Run for 12 years, the same valley
+  has 5,236 snags at year 6, 2,440 at year 8 and 657 at year 12, with the
+  living trees steady at 1,050-1,120.
+- The snag counts in these tables are from before two later changes: snags
+  now rot slowly while frozen, and in about a year in lakes, where they did
+  not rot at all. With that, seed 1 at year 3 has 2,323 snags, not
+  3,298: 2,245 on land, 69 in rivers and 9 in lakes. So nearly all snags
+  are trees that died on land, not drowned ones.
 
 ## Cost, on the PC
 
