@@ -51,7 +51,10 @@ Decision think(const Senses& senses, const Brain& brain) {
     d.mate = out[out_mate] > 0;
     d.fly = out[out_fly] > 0;
     d.call = out[out_call] > 0;
-    d.attack = out[out_attack] > 0;
+    // Attack is an aimed action. The mouth sense must have found contact
+    // when the decision was made; two ticks of windup still allow an escape.
+    d.attack = out[out_attack] > 0 && senses.in[self_input(self_mouth_size)] != 127;
+    d.rest = out[out_rest] > 0;
     for (int m = 0; m < memories; ++m) {
         d.memory[m] = static_cast<std::int8_t>(out[out_memory0 + m]);
     }
@@ -96,7 +99,7 @@ void shuffle(Brain& brain, std::uint32_t& state) {
     }
 }
 
-Brain founder(bool hunts) {
+Brain founder(bool hunts, bool spares_kin, bool pursues) {
     Brain b{};
     const auto in = [&](int unit, int input) -> std::int8_t& { return b.weight[unit * unit_bytes + input]; };
     const auto bias = [&](int unit) -> std::int8_t& { return b.weight[unit * unit_bytes + inputs]; };
@@ -154,6 +157,15 @@ Brain founder(bool hunts) {
     in(13, self_input(self_pain)) = 64;
     out(out_pace, 13) = 80;
     out_bias(out_attack) = -64;
+    // It lies still only when it has cause. One that does not hunt has a
+    // unit to spare for it: spent, below about a fifth of its wind, and not
+    // just hurt, it rests until it has some back.
+    out_bias(out_rest) = -64;
+    if (!hunts) {
+        in(14, self_input(self_stamina)) = -127, bias(14) = 60;
+        out(out_rest, 14) = 127, out_bias(out_rest) = -16;
+        out(out_rest, 13) = -127;
+    }
     if (hunts) {
         // The large swimmer starts with two heritable reflexes. A smaller body
         // at its mouth and hunger favour a strike. Smaller bodies in view draw a turn.
@@ -164,6 +176,26 @@ Brain founder(bool hunts) {
         in(15, sector_input(left, in_size)) = 40, in(15, sector_input(far_left, in_size)) = 24;
         in(15, sector_input(right, in_size)) = -40, in(15, sector_input(far_right, in_size)) = -24;
         out(out_turn, 15) = 16;
+    }
+    if (hunts && pursues) {
+        // The opportunist above strikes more readily the smaller its prey,
+        // and at a body near its own size only when it is nearly starved:
+        // too late. A hunter strikes any body right in front of it, less
+        // readily one bigger than itself, whenever it is less than full.
+        in(14, self_input(self_mouth_size)) = -64;
+        in(14, sector_input(ahead, in_animal)) = 127, bias(14) = -127;
+        out(out_attack, 14) = 64;
+        out(out_turn, 15) = 127;
+        // (It is not wired to sprint. Running flat out at whatever is ahead was
+        // tried and halved what it caught: when to spend its wind is for the
+        // hunting school and for evolution to find.)
+    }
+    if (hunts && spares_kin) {
+        // 8: its own kind in front of it. It does not strike: without this a
+        // hungry parent's first prey is its own young.
+        in(8, sector_input(ahead, in_kin)) = 64;
+        in(8, sector_input(left, in_kin)) = 32, in(8, sector_input(right, in_kin)) = 32;
+        out(out_attack, 8) = -127;
     }
     // It keeps a steady pace unless something slows it.
     out_bias(out_pace) = 40;

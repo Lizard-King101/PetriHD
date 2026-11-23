@@ -21,6 +21,7 @@ Rgb scaled(Rgb c, float k) {
 
 struct Canvas {
     int w, h;
+    std::uint8_t alpha = 255;
     std::vector<std::uint8_t> px;
 
     Canvas(int width, int height) : w(width), h(height), px(std::size_t(width) * height * 4, 0) {}
@@ -35,7 +36,7 @@ struct Canvas {
         p[0] = c.r;
         p[1] = c.g;
         p[2] = c.b;
-        p[3] = 255;
+        p[3] = alpha;
     }
     // A texel that gives its own light.
     void glow(int x, int y, Rgb c) {
@@ -73,7 +74,7 @@ constexpr Rgb twig_light{128, 112, 98}, twig_mid{104, 92, 82}, twig_dark{72, 62,
 // way. The form sets where the clumps go: a ball, a broad flat-bottomed
 // parasol, a tall egg, or a loose scatter with sky and limbs between.
 void canopy(Canvas& c, float cx, float cy, float rx, float ry, const Tones& tones, std::uint32_t seed,
-            Form form = Form::round) {
+            Form form = Form::round, float pitch = 0) {
     struct Clump {
         float x, y, r, z;
     };
@@ -90,18 +91,27 @@ void canopy(Canvas& c, float cx, float cy, float rx, float ry, const Tones& tone
         const float r = size * (open ? 0.55f + 0.75f * unit(h) : 0.72f + 0.6f * unit(h)) * (1.12f - 0.3f * out);
         float x = std::cos(a) * out * std::max(0.0f, rx - r * 0.8f) + (unit(h >> 8) - 0.5f) * size * 0.5f;
         float y = std::sin(a) * out * std::max(0.0f, ry - r * 0.8f) + (unit(h >> 12) - 0.5f) * size * 0.5f;
-        if (form == Form::spreading && y > 0) {
-            y *= 0.4f; // a flat underside
-        } else if (form == Form::columnar) {
-            x *= 0.5f + 0.5f * std::pow(std::clamp((y / ry + 1) / 2, 0.0f, 1.0f), 0.6f); // narrowing to the top
+        const float dome = std::sqrt(std::max(0.0f, 1 - out * out));
+        float z = dome * small * 0.55f + y * 0.6f + unit(h >> 16) * r * 0.4f;
+        if (pitch > 0) {
+            // Lay the clumps over the top and shoulder of an ellipsoid.
+            // The same clump tips toward or away from us as the pitch changes.
+            const float lift = (dome - 0.30f) * ry + (unit(h >> 16) - 0.5f) * r;
+            float depth = std::sin(a) * out * std::max(0.0f, rx - r * 0.8f);
+            if (form == Form::columnar) {
+                const float taper = 1 - dome * 0.28f;
+                x *= taper;
+                depth *= taper;
+            }
+            y = depth * std::sin(pitch) - lift * std::cos(pitch);
+            z = depth * std::cos(pitch) + lift * std::sin(pitch);
         }
-        // The crown bulges toward the camera, and clumps lower on the screen are nearer.
-        const float z = std::sqrt(std::max(0.0f, 1 - out * out)) * small * 0.55f + y * 0.6f + unit(h >> 16) * r * 0.4f;
         clumps.push_back({cx + x, cy + y, r, z});
     }
 
     const int x0 = int(std::floor(cx - rx)) - 2, x1 = int(std::ceil(cx + rx)) + 2;
-    const int y0 = int(std::floor(cy - ry)) - 2, y1 = int(std::ceil(cy + ry)) + 2;
+    const float yr = pitch > 0 ? std::max(rx, ry) + size : ry;
+    const int y0 = int(std::floor(cy - yr)) - 2, y1 = int(std::ceil(cy + yr)) + 2;
     const int bw = x1 - x0 + 1, bh = y1 - y0 + 1;
     struct Texel {
         float z = -1e9f, light = 0;
@@ -212,20 +222,6 @@ void twigs(Canvas& c, float x, float y, float angle, float length, float width, 
     }
 }
 
-// Needles on a conifer's skirt: sprays fanning out from the trunk, each lit
-// on its left edge and shaded on its right, so a tier reads as drooping
-// branches. `s` is -1 to 1 across the tier; returns the spray and where in it.
-struct Spray {
-    int index;
-    float across; // 0 at its left edge, 1 at its right
-};
-Spray spray_at(float s, float radius) {
-    const int sprays = std::max(3, int(radius * 2 / 4.5f + 0.5f));
-    const float f = std::clamp(s * 0.5f + 0.5f, 0.0f, 0.9999f) * float(sprays);
-    return {int(f), f - std::floor(f)};
-}
-float spray_tone(Spray spray) { return spray.across < 0.3f ? 0.75f : spray.across > 0.72f ? -0.85f : 0.0f; }
-
 // A leafless crown as the camera sees it at `pitch`: limbs growing up and out
 // from the top of the trunk in three dimensions, forking as they go, then
 // drawn from the back to the front. From the side they fan upward; from
@@ -301,76 +297,48 @@ Image bare_crown(int radius, bool narrow, int bark, float pitch, std::uint32_t s
     return {canvas.w, canvas.h, ax, canvas.h - 1 - ay, std::move(canvas.px)};
 }
 
-// A conifer: tiers of drooping boughs, each wider than the one above, lit on
-// the left, each tier shading the top of the next.
-void spire(Canvas& c, float cx, int top, int bottom, float radius, const Tones& tones, std::uint32_t seed) {
-    const int height = std::max(1, bottom - top);
-    const int tiers = std::clamp(height / 8, 2, 11);
-    const auto envelope = [&](float f) { return radius * std::pow(std::clamp(f, 0.0f, 1.0f), 0.8f); };
-    for (int y = top; y < bottom; ++y) {
-        const float f = (float(y - top) + 0.5f) / float(height);
-        const float in_tiers = f * float(tiers);
-        const int tier = std::min(tiers - 1, int(in_tiers));
-        const float u = in_tiers - float(tier);
-        const float half = std::max(0.6f, envelope(float(tier + 1) / float(tiers)) * (0.42f + 0.58f * u));
-        const float skirt = envelope(float(tier) / float(tiers)); // the tier above, at its widest
-        for (int x = int(std::floor(cx - half)) - 1; x <= int(std::ceil(cx + half)) + 1; ++x) {
-            const float off = float(x) + 0.5f - cx, s = off / half;
-            const auto h = hash(x, y, seed);
-            if (std::fabs(s) > 1 || (half > 3 && std::fabs(s) > 0.84f && (h & 1))) {
-                continue;
-            }
-            float t = 2.15f - 1.25f * s + 0.9f * (0.45f - u);
-            if (tier > 0 && u < 0.3f && std::fabs(off) < skirt) {
-                t -= 1.3f; // under the boughs above
-            }
-            t += spray_tone(spray_at(s, half)) * u + (unit(h >> 8) - 0.5f) * 0.6f;
-            if (u > 0.82f && tier < tiers - 1) {
-                t -= 1.0f; // the hem of each tier
-            }
-            c.put(x, y, tones[std::size_t(std::clamp(int(std::floor(t + 0.5f)), 0, 4))]);
-        }
+// Each tier is a ring of needle sprays. Its rim has a longer tip per
+// branch and a notch between branches. Project the same facets from each
+// pitch, painting the far side before the near side.
+void needle_tier(Canvas& canvas, int cx, float cy, float radius, float height, float pitch,
+                 const Tones& tones, std::uint32_t seed, bool tip) {
+    const int branches = std::clamp(int(radius * 0.5f), 6, 20);
+    const float phase = unit(hash(2, 8, seed)) * 6.2831853f;
+    const float sp = std::sin(pitch), cp = std::cos(pitch);
+    struct Rim { float x, y, depth, light; };
+    struct Face { Rim a, b; };
+    std::vector<Face> faces;
+    const auto rim = [&](int branch, int side) {
+        const auto id = hash(branch % branches, 4, seed);
+        const float angle = phase + (branch + side * 0.28f) * 6.2831853f / branches;
+        const float r = radius * (side == 0 ? 0.90f + 0.10f * unit(id) : 0.65f + 0.12f * unit(id >> 8));
+        const float y = r * std::sin(angle), z = side == 0 ? 0 : height * 0.14f;
+        return Rim{r * std::cos(angle), y * sp - z * cp, y * cp + z * sp,
+                   2.15f - 0.72f * std::cos(angle) - 0.62f * std::sin(angle) + (side == -1 ? 0.55f : side == 1 ? -0.65f : 0.1f)};
+    };
+    for (int k = 0; k < branches; ++k) {
+        const Rim left = rim(k, -1), point = rim(k, 0), right = rim(k, 1);
+        faces.push_back({left, point});
+        faces.push_back({point, right});
+        faces.push_back({right, rim((k + 1) % branches, -1)});
     }
-}
-
-// One tier of a conifer, seen from above and in front: sprays drooping
-// outward from the trunk to a hem of points, lit on the left, dark at the
-// top where the tier above hangs over it.
-void bough(Canvas& c, float cx, int top, int bottom, float radius, bool tip, const Tones& tones, std::uint32_t seed) {
-    const int height = std::max(1, bottom - top);
-    const float deepest = std::min(6.0f, float(height) * 0.4f);
-    for (int y = top; y < bottom; ++y) {
-        const float u = (float(y - top) + 0.5f) / float(height);
-        const float half = std::max(0.6f, radius * (tip ? std::pow(u, 0.8f) : 0.28f + 0.72f * std::pow(u, 0.7f)));
-        for (int x = int(std::floor(cx - half)) - 1; x <= int(std::ceil(cx + half)) + 1; ++x) {
-            const float off = float(x) + 0.5f - cx, s = off / half;
-            if (std::fabs(s) > 1) {
-                continue;
-            }
-            // The hem: each spray ends in a point, some longer than others,
-            // and the hem curls up at the sides.
-            const Spray spray = spray_at(s, radius);
-            const float length = deepest * (0.45f + 0.55f * unit(hash(spray.index, 7, seed)));
-            const float point = length * (1 - std::fabs(spray.across - 0.5f) * 2);
-            const float curl = s * s * s * s * std::min(4.0f, float(height) / 4);
-            if (height > 5 && float(bottom - y) <= deepest - point + curl) {
-                continue;
-            }
-            float t = 2.0f - 1.2f * s + 1.1f * (u - 0.55f) + spray_tone(spray) * std::min(1.0f, u * 1.6f) +
-                      (unit(hash(spray.index, 3, seed)) - 0.5f) * 0.8f;
-            if (!tip && u < 0.32f && std::fabs(off) < radius * 0.7f) {
-                t -= 1.4f; // under the boughs above
-            }
-            t += (unit(hash(x, y, seed) >> 8) - 0.5f) * 0.6f;
-            c.put(x, y, tones[std::size_t(std::clamp(int(std::floor(t + 0.5f)), 0, 4))]);
-        }
-    }
-    const Rgb ink = scaled(tones[0], 0.72f);
-    for (int x = int(cx - radius) - 1; x <= int(cx + radius) + 1; ++x) {
-        for (int y = bottom - 1; y > top; --y) {
-            if (c.solid(x, y)) {
-                c.put(x, y, ink); // the underside of the hem
-                break;
+    std::stable_sort(faces.begin(), faces.end(), [](const Face& a, const Face& b) {
+        return a.a.depth + a.b.depth < b.a.depth + b.b.depth;
+    });
+    const float peak = -height * cp;
+    for (const Face& face : faces) {
+        const Rim a = face.a, b = face.b;
+        const float ay = a.y - peak, by = b.y - peak, area = a.x * by - b.x * ay;
+        if (std::fabs(area) < 0.001f) continue;
+        for (int y = int(std::floor(cy + std::min({peak, a.y, b.y}))); y <= int(std::ceil(cy + std::max({peak, a.y, b.y}))); ++y) {
+            for (int x = cx + int(std::floor(std::min({0.0f, a.x, b.x}))); x <= cx + int(std::ceil(std::max({0.0f, a.x, b.x}))); ++x) {
+                const float dx = float(x - cx), dy = float(y) - cy - peak;
+                const float u = (dx * by - dy * b.x) / area, v = (a.x * dy - ay * dx) / area, out = u + v;
+                if (u < 0 || v < 0 || out > 1) continue;
+                float tone = (1 - out) * (tip ? 3.8f : 1.6f) + u * a.light + v * b.light;
+                tone += (unit(hash(x / 2, y, seed)) - 0.5f) * 0.85f;
+                if (out > 0.87f) tone -= 1.0f;
+                canvas.put(x, y, tones[std::clamp(int(tone + 0.5f), 0, 4)]);
             }
         }
     }
@@ -536,7 +504,9 @@ std::uint64_t Spec::key() const {
 }
 
 Image paint(const Spec& spec) {
-    const std::uint32_t seed = phd::hash3(int(spec.key() & 0x7fffffff), int(spec.key() >> 31), 0x3c6ef372u);
+    const auto shape = spec.key() & ~std::uint64_t(3); // one plant, seen at different pitches
+    const std::uint32_t seed = phd::hash3(int(shape & 0x7fffffff), int(shape >> 31), 0x3c6ef372u);
+    const float pitch = view_pitch[std::min<int>(spec.view, views - 1)] * 0.01745329252f;
     const Rgb pigment{spec.r, spec.g, spec.b};
     const Tones tones = leaf_tones(pigment);
     const bool is_bare = spec.state & bare;
@@ -550,9 +520,10 @@ Image paint(const Spec& spec) {
         const float rx = float(radius) * (form == Form::columnar ? 0.68f : 1.0f);
         const float ry = float(radius) * (form == Form::spreading ? 0.6f : form == Form::columnar ? 1.2f : 0.88f);
         // Clumps at the rim reach a little past the crown's ellipse.
-        Canvas c(radius * 2 + 13, int(ry) * 2 + 15);
+        const int extent = int(std::ceil(form == Form::round ? ry : std::max(rx, ry)));
+        Canvas c(radius * 2 + 13, extent * 2 + 15);
         const int ax = c.w / 2, bottom = c.h - 1;
-        const float cy = float(int(ry) + 7);
+        const float cy = float(extent + 7);
         if (is_bare) {
             return bare_crown(radius, form == Form::columnar, (spec.state & pale) ? 2 : 1,
                               view_pitch[std::min<int>(spec.view, views - 1)],
@@ -562,21 +533,35 @@ Image paint(const Spec& spec) {
             if (form == Form::open || form == Form::spreading) {
                 // Limbs reaching into the crown, seen wherever the leaves part.
                 const float girth = std::clamp(float(radius) * 0.09f, 1.0f, 4.0f);
-                for (int k = -2; k <= 2; ++k) {
+                const float phase = unit(hash(3, 4, seed)) * 6.2831853f;
+                for (int k = 0; k < 5; ++k) {
                     const auto h = hash(k, 13, seed);
-                    limb(c, float(ax), cy + ry * 0.3f, float(ax) + (float(k) + unit(h) - 0.5f) * rx * 0.3f,
-                         cy - ry * (0.15f + 0.3f * unit(h >> 16)), girth, 1, (spec.state & pale) ? 2 : 0, h, 1e9f);
+                    const float angle = phase + (k + unit(h) * 0.4f) * 6.2831853f / 5;
+                    const float reach = rx * (0.47f + 0.24f * unit(h >> 8));
+                    const float y = std::sin(angle) * reach * std::sin(pitch) - ry * 0.38f * std::cos(pitch);
+                    limb(c, float(ax), cy, float(ax) + std::cos(angle) * reach, cy + y,
+                         girth, 1, (spec.state & pale) ? 2 : 0, h, 1e9f);
                 }
             }
-            canopy(c, float(ax) + 0.5f, cy, rx, ry, tones, seed, form);
+            c.alpha = foliage_alpha;
+            canopy(c, float(ax) + 0.5f, cy, rx, ry, tones, seed, form, form == Form::round ? 0 : pitch);
         }
         return finish(c, ax, bottom - int(cy));
     }
-    case Kind::bough: {
-        Canvas c(radius * 2 + 5, height + 2);
-        const int ax = c.w / 2;
-        bough(c, float(ax) + 0.5f, 1, c.h, float(radius), (spec.state & tip) != 0, tones, seed);
-        return finish(c, ax);
+    case Kind::bough:
+    case Kind::cone_bush: {
+        const bool shrub = spec.kind == Kind::cone_bush;
+        const float foot = radius * std::sin(pitch);
+        const int ax = radius + 2, ay = int(std::ceil(std::max(height * std::cos(pitch), foot))) + 2;
+        Canvas c(ax * 2 + 1, ay + int(std::ceil(foot)) + 3);
+        const int tiers = shrub ? std::clamp(height / 8, 2, 8) : 1;
+        c.alpha = shrub ? 255 : foliage_alpha;
+        for (int k = 0; k < tiers; ++k) {
+            const float f = float(k) / tiers, rise = float(height) / tiers;
+            needle_tier(c, ax, ay - height * f * std::cos(pitch), radius * (1 - f), rise,
+                        pitch, tones, seed + k, shrub ? k == tiers - 1 : (spec.state & tip) != 0);
+        }
+        return finish(c, ax, c.h - 1 - ay);
     }
     case Kind::trunk: {
         // The radius is the girth at the ground.
@@ -588,15 +573,6 @@ Image paint(const Spec& spec) {
         const Rgb foot = bark == 2 ? pale_dark : bark == 1 ? twig_dark : bark_dark;
         c.put(ax - girth / 2 - 1, bottom, scaled(foot, 0.9f)); // the root flare
         c.put(ax + (girth + 1) / 2, bottom, scaled(foot, 0.8f));
-        return finish(c, ax);
-    }
-    case Kind::cone_bush: {
-        Canvas c(radius * 2 + 5, height + 2);
-        const int ax = c.w / 2, bottom = c.h - 1;
-        const float girth = std::clamp(float(radius) * 0.16f, 1.0f, 7.0f);
-        limb(c, float(ax), float(bottom), float(ax), float(bottom - height / 2), girth, 1, false, seed,
-             float(bottom - 1) + 0.5f);
-        spire(c, float(ax) + 0.5f, 1, bottom, float(radius), tones, seed);
         return finish(c, ax);
     }
     case Kind::bush: {

@@ -24,6 +24,7 @@ constexpr GLenum LESS = 0x0201, LEQUAL = 0x0203;
 constexpr GLenum DEPTH_TEST = 0x0B71;
 constexpr GLenum DITHER = 0x0BD0;
 constexpr GLenum ALPHA_BITS = 0x0D55;
+constexpr GLenum MAX_TEXTURE_SIZE = 0x0D33, MAX_RENDERBUFFER_SIZE = 0x84E8;
 constexpr GLbitfield DEPTH_BUFFER_BIT = 0x0100;
 constexpr GLenum ZERO = 0, ONE = 1, SRC_ALPHA = 0x0302, ONE_MINUS_SRC_ALPHA = 0x0303, DST_ALPHA = 0x0304, DST_COLOR = 0x0306;
 constexpr GLenum BLEND = 0x0BE2;

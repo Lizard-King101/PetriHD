@@ -163,13 +163,13 @@ int development_height(int x, int y, int w, int h, std::uint32_t seed) {
 
 } // namespace
 
-void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent, Layout layout, int pond_depth_dm) {
+void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent, Layout layout, int arena_depth_dm, int arena_land) {
     width = w;
     height = h;
     const std::size_t n = std::size_t(w) * h;
-    if (layout == Layout::training_pond) {
+    if (layout == Layout::arena) {
         coast_side = 0;
-        elevation.assign(n, std::int16_t(pond_depth_dm + 2));
+        elevation.assign(n, std::int16_t(arena_depth_dm + 2));
         filled = elevation;
         downstream.assign(n, -1);
         order.resize(n);
@@ -177,11 +177,13 @@ void Terrain::generate(std::uint32_t seed, int w, int h, int ocean_percent, Layo
         basin.assign(n, 0); channel.assign(n, 0); ocean.assign(n, 0); coast.assign(n, 0);
         sea_distance.assign(n, 255); substrate.assign(n, std::uint8_t(Substrate::gravel));
         hollow.assign(n, 0); aspect.assign(n, 0); slope.assign(n, 0);
-        const auto area = std::uint32_t((w - 2) * (h - 2));
-        basins = {Basin{}, Basin{std::int16_t(pond_depth_dm), 0, area, area * std::uint32_t(pond_depth_dm), w + 1}};
-        for (int y = 1; y < h - 1; ++y) for (int x = 1; x < w - 1; ++x) {
+        // The western columns are dry ground, level with the bank; the rest is water.
+        const int dry = std::clamp(arena_land, 0, w - 2);
+        const auto area = std::uint32_t((w - 2 - dry) * (h - 2));
+        basins = {Basin{}, Basin{std::int16_t(arena_depth_dm), 0, area, area * std::uint32_t(arena_depth_dm), w + 1 + dry}};
+        for (int y = 1; y < h - 1; ++y) for (int x = 1 + dry; x < w - 1; ++x) {
             const int cell = y * w + x;
-            elevation[cell] = 0; filled[cell] = std::int16_t(pond_depth_dm); basin[cell] = 1;
+            elevation[cell] = 0; filled[cell] = std::int16_t(arena_depth_dm); basin[cell] = 1;
         }
         return;
     }

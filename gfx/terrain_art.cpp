@@ -154,7 +154,7 @@ void day_tint(const phd::World& world, std::uint8_t out[3]) {
 }
 
 void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
-          bool flat) {
+          bool flat, bool tree_xray) {
     const bool hill_shade = flat;
     const int cw = world.width(), ch = world.height();
     const auto& terrain = world.terrain();
@@ -234,7 +234,7 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                 // with the southern ones in front; their shadows fall away
                 // from the sun.
                 const Tree* top = nullptr;
-                bool shadowed = false;
+                bool shadowed = false, trunk = false;
                 const auto here = std::size_t(cy - cy0) * cws + std::size_t(cx - cx0);
                 for (int k = 0; k < near_count[here]; ++k) {
                     const Tree& t = *near[here * per_cell + k];
@@ -246,6 +246,10 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                         const float turn = std::atan2(dy, dx) * (5 / 6.2831853f) + float(t.id % 16) / 16.0f;
                         const float off = std::fabs(turn - std::floor(turn + 0.5f)) * (6.2831853f / 5) * std::sqrt(dx * dx + dy * dy);
                         covers = off < 0.6f * inv;
+                    }
+                    if (tree_xray && flat && !t.bare) {
+                        trunk |= int(t.x * texels_per_cell) == tx && int(t.y * texels_per_cell) == ty;
+                        covers = covers && (tx & 1) == 0 && (ty & 1) == 0;
                     }
                     if (covers && (!top || t.y > top->y)) {
                         top = &t;
@@ -271,6 +275,8 @@ void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int 
                     } else if ((noise >> 8 & 7) == 0) {
                         c = scale(c, 0.85f); // leaf clumps
                     }
+                } else if (trunk) {
+                    c = {104, 82, 57};
                 } else if (shadowed && flat) {
                     c = scale(c, 0.68f); // the tilted view casts its own shadows
                 }

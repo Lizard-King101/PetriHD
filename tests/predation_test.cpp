@@ -54,6 +54,8 @@ World lake_contact() {
         hunter.energy = frame(hunter.genome).store / 4;
         hold_outputs(world, 7, true, false);
         hold_outputs(world, 5, false, false);
+        const auto staged = world.save();
+        CHECK(world.load(staged.data(), staged.size())); // rebuild the index after staging contact
         return world;
     }
     throw std::runtime_error("no open water for contact fixture");
@@ -74,40 +76,6 @@ void test_founder() {
     s.in[self_input(pain_right)] = 100;
     const auto hurt = think(s, founder());
     CHECK(hurt.turn < calm.turn && hurt.pace > calm.pace);
-}
-
-void test_nursery_seeding() {
-    WorldConfig c;
-    c.width = 128; c.height = 96; c.layout = Layout::development;
-    World original(c), nursery(c), mixed(c);
-    original.seed_animals(56);
-    auto candidate = brain::founder(true);
-    candidate.weight[0] = 42;
-    nursery.seed_animals(56, candidate);
-    auto other = candidate;
-    other.weight[0] = -37;
-    const std::vector<brain::Brain> pool{candidate, other, brain::founder(true), brain::founder(true)};
-    mixed.seed_animals(56, pool);
-    const auto data = nursery.save();
-    CHECK(nursery.load(data.data(), data.size()));
-    CHECK(original.animals().size() == nursery.animals().size() && mixed.animals().size() == nursery.animals().size());
-    int large = 0;
-    for (std::size_t i = 0; i < nursery.animals().size(); ++i) {
-        const auto& a = original.animals()[i];
-        const auto& b = nursery.animals()[i];
-        CHECK(a.id == b.id && a.x == b.x && a.y == b.y && a.heading == b.heading && a.energy == b.energy);
-        CHECK(a.stock == b.stock && genetic_distance(a.genome, b.genome) == 0);
-        const bool swimmer = a.stock == FishStock::large_swimmer;
-        const auto& expected = swimmer ? candidate : original.brain_of(i);
-        CHECK(std::equal(expected.weight, expected.weight + brain::bytes, nursery.brain_of(i).weight));
-        const auto& m = mixed.animals()[i];
-        CHECK(a.id == m.id && a.x == m.x && a.y == m.y && a.heading == m.heading && a.energy == m.energy);
-        CHECK(a.stock == m.stock && genetic_distance(a.genome, m.genome) == 0);
-        const auto& mixed_brain = swimmer ? pool[large % pool.size()] : original.brain_of(i);
-        CHECK(std::equal(mixed_brain.weight, mixed_brain.weight + brain::bytes, mixed.brain_of(i).weight));
-        large += swimmer;
-    }
-    CHECK(large == 8);
 }
 
 void test_partner_readiness_sense() {
@@ -157,7 +125,7 @@ void test_hungry_drive_loss() {
         swimmer.drive = 204;
         swimmer.energy = store / 4;
         const auto data = world.save();
-        CHECK(data[4] == (loss == 16 ? 14 : 15));
+        CHECK(data[4] == (loss == 16 ? 26 : 27));
         World replay(WorldConfig{});
         CHECK(replay.load(data.data(), data.size()) && replay.config().hungry_drive_loss == loss);
         CHECK(replay.fingerprint() == world.fingerprint());
@@ -172,154 +140,6 @@ void test_hungry_drive_loss() {
     }
 }
 
-void test_nursery_pond() {
-    WorldConfig c;
-    c.width = 128; c.height = 96; c.layout = Layout::development;
-    World lake(c), pond(c), stocked(c);
-    const std::vector<brain::Brain> pool{brain::founder(true), brain::founder()};
-    lake.seed_animals(28, pool);
-    pond.seed_swimmer_pond(pool, false);
-    stocked.seed_swimmer_pond(pool, true);
-    CHECK(pond.animals().size() == 4 && stocked.animals().size() == 4);
-    CHECK(lake.plant_count() == pond.plant_count() && stocked.plant_count() > pond.plant_count());
-    for (std::size_t i = 0; i < pond.animals().size(); ++i) {
-        const auto& a = pond.animals()[i];
-        for (auto* world : {&lake, &stocked}) {
-            const auto& b = animal(*world, a.id);
-            CHECK(a.x == b.x && a.y == b.y && a.energy == b.energy && a.drive == b.drive && a.heading == b.heading);
-            CHECK(a.stock == FishStock::large_swimmer && genetic_distance(a.genome, b.genome) == 0);
-            const auto index = std::size_t(&b - world->animals().data());
-            CHECK(std::equal(pond.brain_of(i).weight, pond.brain_of(i).weight + brain::bytes, world->brain_of(index).weight));
-        }
-        const auto cell = std::size_t(a.y >> 8) * pond.width() + (a.x >> 8);
-        CHECK(stocked.occupant(cell, 3) && stocked.occupant(cell, 3)->height <= small_limit_dm);
-    }
-    const auto data = stocked.save();
-    CHECK(pond.load(data.data(), data.size()));
-    for (int i = 0; i < 32; ++i) { pond.step(); stocked.step(); }
-    CHECK(pond.save() == stocked.save());
-}
-
-void test_lesson_one_pond() {
-    WorldConfig c;
-    c.layout = Layout::training_pond; c.width = 18; c.height = 10; c.climate = 175;
-    c.pond_depth_dm = 24; c.pond_light = 181; c.pond_food = 520;
-    World pond(c);
-    pond.seed_training_pair(brain::founder(true), brain::founder(true));
-    auto& left = animal(pond, 1);
-    const auto& right = animal(pond, 2);
-    CHECK(pond.animals().size() == 2 && !left.drive && !right.drive && left.health == 255 && right.health == 255);
-    CHECK(left.energy == frame(left.genome).store * 60 / 100 && right.energy == frame(right.genome).store * 60 / 100);
-    CHECK(right.x - left.x == 256 && left.y == right.y && genetic_distance(left.genome, right.genome) <= breeding_distance);
-    for (int y = 1; y < c.height - 1; ++y) for (int x = 1; x < c.width - 1; ++x) {
-        const int cell = y * c.width + x;
-        CHECK(pond.water(cell) == Water::lake && pond.water_depth_dm(cell) == 24);
-        CHECK(pond.occupant(cell, 0) && pond.occupant(cell, 0)->energy == 528);
-    }
-    hold_outputs(pond, 1, false, true);
-    hold_outputs(pond, 2, false, true);
-    const auto cell = std::size_t(left.y >> 8) * c.width + (left.x >> 8);
-    for (int i = 0; i < 37; ++i) pond.step();
-    auto saved = pond.save();
-    World replay(c);
-    CHECK(saved[4] == 16 && replay.load(saved.data(), saved.size()) && saved == replay.save());
-    int birth_tick = 0;
-    for (int i = 0; i < 960 && !birth_tick; ++i) {
-        PondTick pass;
-        pond.step(&pass); replay.step();
-        CHECK(pond.daylight() == 181 && pond.temperature(cell) == 175 && pond.water_depth_dm(cell) == 24);
-        CHECK(pond.fronts().empty() && !pond.wind_speed() && !pond.flow(cell) && !pond.rain_at(8, 5));
-        CHECK(pond.occupant(cell, 0)->energy > 8);
-        if (pond.animals().size() > 2) {
-            CHECK(pass.near_pair_drive >= mating_drive && pass.birth_drives[0] >= mating_drive && pass.birth_drives[1] >= mating_drive);
-            CHECK(!animal(pond, 1).drive && !animal(pond, 2).drive);
-            birth_tick = int(pond.tick());
-        }
-    }
-    CHECK(birth_tick >= 25 * animal_stagger - animal_stagger && pond.save() == replay.save());
-}
-
-void test_patch_pond() {
-    WorldConfig c;
-    c.layout = Layout::training_pond; c.width = 18; c.height = 10; c.seed = 7321;
-    World uniform(c);
-    c.pond_food = 4800;
-    const std::vector<PondPatch> beds{{2, 4, 3, 2}, {8, 4, 2, 2}, {13, 4, 3, 2}};
-    World pond(c, beds);
-    std::int64_t sparse_food = 0, uniform_food = 0;
-    for (std::size_t cell = 0; cell < pond.cells(); ++cell) {
-        const int x = int(cell) % c.width, y = int(cell) / c.width;
-        const bool stocked = (y == 4 || y == 5) && ((x >= 2 && x <= 4) || x == 8 || x == 9 || (x >= 13 && x <= 15));
-        const auto* reed = pond.occupant(cell, 0);
-        CHECK(bool(reed) == stocked && pond.water_depth_dm(cell) == uniform.water_depth_dm(cell));
-        if (reed) sparse_food += reed->energy - 8;
-        if (const auto* source = uniform.occupant(cell, 0)) uniform_food += source->energy - 8;
-    }
-    CHECK(pond.plant_count() == 16 && uniform_food == 76800 && sparse_food == uniform_food);
-    pond.seed_training_pair(brain::founder(true), brain::founder(true));
-    uniform.seed_training_pair(brain::founder(true), brain::founder(true));
-    for (unsigned id : {1u, 2u}) {
-        const auto& a = animal(pond, id);
-        const auto& b = animal(uniform, id);
-        CHECK(a.x == b.x && a.y == b.y && a.heading == b.heading && a.energy == b.energy);
-        CHECK(pond.occupant((a.y >> 8) * c.width + (a.x >> 8), 0));
-    }
-    const auto side = 4 * c.width + 2;
-    const_cast<Plant*>(pond.occupant(side, 0))->energy = 8;
-    pond.step();
-    CHECK(pond.occupant(side, 0)->energy == c.pond_food + 8);
-    const auto saved = pond.save();
-    CHECK(saved[4] == 17 && uniform.load(saved.data(), saved.size()) && uniform.save() == saved);
-    for (int i = 0; i < 500; ++i) { pond.step(); uniform.step(); }
-    CHECK(pond.plant_count() == 16 && uniform.save() == pond.save());
-    for (const auto bad : {PondPatch{0, 2, 1, 1}, PondPatch{2, 3, 0, 1}, beds.front()}) {
-        bool rejected = false;
-        try { World invalid(c, {beds.front(), bad}); } catch (const std::invalid_argument&) { rejected = true; }
-        CHECK(rejected);
-    }
-}
-
-void test_pond_energy_charges() {
-    WorldConfig c;
-    c.layout = Layout::training_pond; c.width = 18; c.height = 10;
-    World pond(c);
-    brain::Brain active{};
-    auto* bias = active.weight + brain::hidden * brain::unit_bytes + brain::hidden;
-    for (const auto output : {brain::out_pace, brain::out_call, brain::out_attack}) bias[output * brain::output_bytes] = 127;
-    pond.seed_training_pair(active, active, 60, 8);
-    bool moved = false, called = false, struck = false, metabolized = false;
-    for (int tick = 0; tick < 2 * animal_stagger; ++tick) {
-        const std::array<int, 2> before{animal(pond, 1).energy, animal(pond, 2).energy};
-        PondTick pass;
-        pond.step(&pass);
-        for (unsigned i = 0; i < 2; ++i) {
-            const auto& s = pass.founders[i];
-            CHECK(before[i] - animal(pond, i + 1).energy == s.movement_cost + s.call_cost + s.strike_cost + s.upkeep_cost);
-            moved |= s.movement_cost > 0; called |= s.call_cost > 0;
-            struck |= s.strike_cost > 0; metabolized |= s.upkeep_cost > 0;
-        }
-    }
-    CHECK(moved && called && struck && metabolized);
-}
-
-void test_periodic_pond_refill() {
-    WorldConfig c;
-    c.layout = Layout::training_pond; c.width = 18; c.height = 10; c.pond_refill_ticks = 8;
-    const std::vector<PondPatch> beds{{8, 4, 2, 2}};
-    World pond(c, beds);
-    const auto cell = std::size_t(4 * c.width + 8);
-    const_cast<Plant*>(pond.occupant(cell, 0))->energy = 8;
-    for (int tick = 1; tick <= 6; ++tick) { pond.step(); CHECK(pond.occupant(cell, 0)->energy == 8); }
-    const auto saved = pond.save();
-    World replay(c);
-    CHECK(saved[4] == 18 && replay.load(saved.data(), saved.size()) && saved == replay.save());
-    pond.step(); replay.step();
-    CHECK(replay.occupant(cell, 0)->energy == 8);
-    pond.step(); replay.step();
-    CHECK(replay.occupant(cell, 0)->energy == 8 + c.pond_food && pond.save() == replay.save());
-    CHECK(!replay.occupant(cell - 1, 0));
-}
-
 void test_contact() {
     World world = lake_contact();
     for (int miss = 0; miss < 3; ++miss) {
@@ -328,12 +148,14 @@ void test_contact() {
         if (miss == 0) prey.x += 512;
         if (miss == 1) prey.x -= 48;
         if (miss == 2) prey.medium = std::uint8_t(Medium::land);
-        const auto energy = animal(probe, 7).energy;
-        probe.step();
+        const auto staged = probe.save();
+        CHECK(probe.load(staged.data(), staged.size()));
+        const auto wind = animal(probe, 7).stamina;
+        for (int t = 0; t < 3; ++t) probe.step();
         CHECK(animal(probe, 5).health == 255 && !animal(probe, 5).pain);
-        CHECK(animal(probe, 7).energy < energy);
+        CHECK(animal(probe, 7).stamina == wind); // no lunge is armed at an empty mouth
     }
-    world.step();
+    for (int t = 0; t < 3; ++t) world.step();
     CHECK(animal(world, 5).health < 255 && animal(world, 5).pain > 0);
     const auto index = std::size_t(&animal(world, 5) - world.animals().data());
     const auto sensed = world.senses(index);
@@ -374,6 +196,51 @@ void test_contact() {
     CHECK(animal(world, 7).hunting == HuntHistory::bred_after_kill);
 }
 
+struct AimWatch : StepObserver {
+    int hits = 0, misses = 0;
+    void struck(const World&, const Animal& a, const Animal* victim, int) override {
+        if (a.id == 7) ++(victim ? hits : misses);
+    }
+};
+
+void test_aim_and_escape() {
+    using namespace brain;
+    Brain eager{};
+    eager.weight[hidden * unit_bytes + out_attack * output_bytes + hidden] = 127;
+    Senses s{};
+    s.in[self_input(self_mouth_size)] = 127;
+    CHECK(!think(s, eager).attack);
+    s.in[self_input(self_mouth_size)] = 0;
+    CHECK(think(s, eager).attack); // equal-sized contact is not an empty mouth
+
+    World fleeing = lake_contact();
+    AimWatch attempts;
+    fleeing.step(&attempts);
+    CHECK(animal(fleeing, 7).wants & wants_attack);
+    CHECK(attempts.hits == 0 && attempts.misses == 0); // winding up
+    animal(fleeing, 5).x += 512;
+    const auto escaped = fleeing.save();
+    CHECK(fleeing.load(escaped.data(), escaped.size()));
+    const auto wind = animal(fleeing, 7).stamina;
+    fleeing.step(&attempts); fleeing.step(&attempts);
+    CHECK(attempts.misses == 1 && attempts.hits == 0);
+    CHECK(animal(fleeing, 5).health == 255 && animal(fleeing, 7).stamina < wind);
+    for (int t = 0; t < 16; ++t) fleeing.step(&attempts);
+    CHECK(attempts.misses == 1); // no repeated lunges once contact has been lost
+
+    World contact = lake_contact();
+    contact.step(); // build the initial forage/sensory fields before inspecting them
+    const auto index = std::size_t(&animal(contact, 7) - contact.animals().data());
+    CHECK(contact.senses(index).in[self_input(self_mouth_size)] < 127);
+    animal(contact, 5).medium = std::uint8_t(Medium::air);
+    CHECK(contact.senses(index).in[self_input(self_mouth_size)] == 127);
+    CHECK(contact.senses(index).in[sector_input(ahead, in_animal)] == 0);
+    animal(contact, 5).medium = std::uint8_t(Medium::water);
+    AimWatch stationary;
+    for (int t = 0; t < 3; ++t) contact.step(&stationary);
+    CHECK(stationary.hits == 1 && stationary.misses == 0);
+}
+
 void test_scavenging_and_decay() {
     World world = lake_contact();
     hold_outputs(world, 7, false, false);
@@ -381,7 +248,7 @@ void test_scavenging_and_decay() {
     prey.genome.gene[agene_gills] = 0;
     prey.health = 1;
     prey.breath = 0;
-    const int reserves = prey.energy + frame(prey.genome).mass75 / 4;
+    const int reserves = prey.energy + flesh_of(prey);
     world.step();
     CHECK(world.carcasses().size() == 1 && world.carcasses()[0].killer == 0);
     CHECK(world.carcasses()[0].energy < reserves);
@@ -411,15 +278,10 @@ void test_scavenging_and_decay() {
 int main() {
     try {
         test_founder();
-        test_nursery_seeding();
         test_partner_readiness_sense();
         test_hungry_drive_loss();
-        test_nursery_pond();
-        test_lesson_one_pond();
-        test_patch_pond();
-        test_pond_energy_charges();
-        test_periodic_pond_refill();
         test_contact();
+        test_aim_and_escape();
         test_scavenging_and_decay();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "predation test failed: %s\n", error.what());

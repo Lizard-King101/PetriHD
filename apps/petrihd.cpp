@@ -6,13 +6,17 @@
 //           [--frames N --speed 0-3]   (run N frames, print timings, quit)
 //           [--zoom Z] [--at X,Y]      (start zoom, 1-256, and focus cell)
 //           [--flat] [--relief K]      (no tilted view; display cells per metre)
-//           [--pixel N]                (screen pixels per art pixel, default 2)
+//           [--performance desktop|low] [--pixel N]
+//           [--fullscreen]             (use the current desktop resolution; F11 toggles)
 //           [--shoreline-study]        (open the spring shoreline art study)
 //           [--dev-map]                (a small hand-laid world, drawn the painted way)
 //           [--brains MODE]            (evolving, frozen, shuffled or neutral)
+//           [--founders FILE]          (founder brains bred by petrihd-nursery)
+//           [--classic]                (start with the five designed founders, not fifty random bodies)
+//           [--bodies SEED]            (which fifty random bodies; by default the world's seed)
 //           [--phase SECONDS]          (how far into the study's animation a shot is taken)
 //
-// Keys: space pause, 1-4 speed, H HUD, S save, F12 screenshot, Esc quit.
+// Keys: space pause, 1-4 speed, H HUD, K kinds alive, X tree X-ray, S save, F12 screenshot, Esc quit.
 // T locks the camera top-down, G turns the tilted view off and on, O puts
 // the test tree and creature at the focus.
 // Long-press or right-click a cell to inspect it.
@@ -38,6 +42,7 @@
 #include "png.hpp"
 #include "pixel_target.hpp"
 #include "pointer.hpp"
+#include "taxonomy.hpp"
 #include "world.hpp"
 #include "tilt_view.hpp"
 #include "world_view.hpp"
@@ -99,7 +104,6 @@ using gfx::Camera;
 
 constexpr float panel_width = 260;
 constexpr double long_press_seconds = 0.45;
-constexpr double bake_budget_seconds = 0.003;
 
 const char* substrate_name(phd::Substrate s) {
     static const char* names[] = {"LOAM", "SAND", "CLAY", "PEAT", "ROCK", "GRAVEL"};
@@ -154,7 +158,7 @@ SDL_GLContext create_context(SDL_Window*& window, int width, int height) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, profile[1]);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, profile[2]);
         window = SDL_CreateWindow("Petri HD", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
-                                  SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+                                  SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
         if (!window) {
             continue;
         }
@@ -172,11 +176,15 @@ SDL_GLContext create_context(SDL_Window*& window, int width, int height) {
 int main(int argc, char** argv) {
     phd::WorldConfig config;
     int width = 800, height = 480;
+    bool start_fullscreen = false;
     std::string load, shot;
     bool quit_after_shot = false;
     bool shoreline_study = false, dev_map = false;
     std::uint32_t inspect_id = 0; // an animal to open the inspector on, and follow
     int animals = -1; // founders to put into a new world; by default, some on the development map
+    std::string founders; // a file of founder brains from the nursery; by default the hand-wired ones
+    bool classic = false; // the five designed founders
+    std::optional<std::uint32_t> body_seed;
     std::optional<phd::BrainMode> brains;
     double start_phase = 1.0; // seconds into the study's animation: the pose a shot is taken in
     int bench_frames = 0;
@@ -184,14 +192,24 @@ int main(int argc, char** argv) {
     std::optional<long long> skip_ticks;
     std::optional<float> start_zoom;
     float relief = 10.0f / float(phd::cell_decimetres), at_x = -1, at_y = -1;
-    bool tilt_enabled = true;
-    int pixel = 2;
+    bool tilt_enabled = true, start_xray = false, start_top_down = false;
+    bool low_performance = false;
+    std::optional<int> requested_pixel;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const bool more = i + 1 < argc;
         if (arg == "--seed" && more) {
             config.seed = std::uint32_t(std::strtoul(argv[++i], nullptr, 0));
         } else if (arg == "--size" && more && std::sscanf(argv[++i], "%dx%d", &width, &height) == 2) {
+        } else if (arg == "--fullscreen") {
+            start_fullscreen = true;
+        } else if (arg == "--performance" && more) {
+            const std::string profile = argv[++i];
+            if (profile != "desktop" && profile != "low") {
+                std::fprintf(stderr, "unknown performance profile '%s' (expected desktop or low)\n", argv[i]);
+                return 2;
+            }
+            low_performance = profile == "low";
         } else if (arg == "--load" && more) {
             load = argv[++i];
         } else if (arg == "--shoreline-study") {
@@ -209,6 +227,13 @@ int main(int argc, char** argv) {
             inspect_id = std::uint32_t(std::atoi(argv[++i]));
         } else if (arg == "--animals" && more) {
             animals = std::atoi(argv[++i]);
+        } else if (arg == "--founders" && more) {
+            founders = argv[++i];
+            classic = true; // the file holds brains for the five
+        } else if (arg == "--classic") {
+            classic = true;
+        } else if (arg == "--bodies" && more) {
+            body_seed = std::uint32_t(std::strtoul(argv[++i], nullptr, 0));
         } else if (arg == "--brains" && more) {
             brains = phd::parse_brain_mode(argv[++i]);
             if (!brains) {
@@ -217,7 +242,11 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--at" && more && std::sscanf(argv[++i], "%f,%f", &at_x, &at_y) == 2) {
         } else if (arg == "--pixel" && more) {
-            pixel = std::clamp(std::atoi(argv[++i]), 1, 8);
+            requested_pixel = std::clamp(std::atoi(argv[++i]), 1, 8);
+        } else if (arg == "--tree-xray") {
+            start_xray = true;
+        } else if (arg == "--top-down") {
+            start_top_down = true;
         } else if (arg == "--flat") {
             tilt_enabled = false;
         } else if (arg == "--relief" && more) {
@@ -234,8 +263,9 @@ int main(int argc, char** argv) {
             shot = argv[++i];
             quit_after_shot = true;
         } else {
-            std::fprintf(stderr, "usage: %s [--seed N] [--size WxH] [--load FILE] [--shot FILE.png] "
-                                 "[--frames N --speed 0-3] [--shoreline-study] [--dev-map] [--brains MODE]\n", argv[0]);
+            std::fprintf(stderr, "usage: %s [--seed N] [--size WxH] [--fullscreen] [--load FILE] [--shot FILE.png] "
+                                 "[--performance desktop|low] [--pixel N] [--frames N --speed 0-3] "
+                                 "[--shoreline-study] [--dev-map] [--brains MODE]\n", argv[0]);
             return 2;
         }
     }
@@ -253,6 +283,15 @@ int main(int argc, char** argv) {
     if (!context) {
         std::fprintf(stderr, "no GLES 2 or GL 2.1 context: %s\n", SDL_GetError());
         return 1;
+    }
+    // Keep the requested logical grid on backends that report a smaller
+    // window in desktop coordinates. Resizes and pointer input use the same units.
+    int window_w, window_h;
+    SDL_GetWindowSize(window, &window_w, &window_h);
+    const float input_x = float(width) / std::max(1, window_w);
+    const float input_y = float(height) / std::max(1, window_h);
+    if (start_fullscreen && SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP) < 0) {
+        std::fprintf(stderr, "fullscreen unavailable: %s\n", SDL_GetError());
     }
     SDL_GL_SetSwapInterval(bench_frames ? 0 : 1);
     if (const char* missing = gl::load()) {
@@ -275,37 +314,87 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    // What lives here is named from outside: families, genera, species and
+    // subspecies, founded as they are met. The bodies a world starts from
+    // are met first, so that their names do not depend on who is seen first.
+    phd::Taxonomy taxa;
+    constexpr int genera = 10, relatives = 5, family = 6;
+    const auto bodies = phd::random_bodies(body_seed.value_or(world.config().seed), genera, relatives);
+    if (classic) {
+        for (int k = 0; k < phd::founder_kinds; ++k) taxa.classify(phd::founder_genome(phd::FounderKind(k)));
+    } else {
+        for (const auto& body : bodies) taxa.classify(body);
+    }
     // Founders, for a world that has no animals yet.
-    if (world.animals().empty() && (animals > 0 || (animals < 0 && dev_map && !world.has_had_animals()))) {
-        world.seed_animals(animals > 0 ? animals : 48);
+    const bool wants_founders = world.animals().empty() && (animals > 0 || (animals < 0 && dev_map && !world.has_had_animals()));
+    // The hunters among the fifty come later, a pair of each, with brains
+    // from the hunting school: once, when the world reaches that year.
+    const std::uint64_t hunters_arrive = std::uint64_t(phd::hunters_arrive_year) * phd::World::ticks_per_year;
+    bool hunters_due = !classic && world.tick() < hunters_arrive && (wants_founders || !load.empty());
+    gfx::CreatureActions actions;
+    const auto step = [&] {
+        world.step(&actions);
+        if (!hunters_due || world.tick() != hunters_arrive) return;
+        hunters_due = false;
+        std::size_t next = 0;
+        int arrived = 0;
+        for (const auto& body : bodies) {
+            if (phd::diet_of(body) != phd::Diet::carnivore) continue;
+            const auto& minds = phd::schooled_hunters();
+            arrived += world.settle(body, phd::hunters_each, minds[next++ % minds.size()]);
+        }
+        std::printf("year %d: %d hunters arrive\n", phd::hunters_arrive_year, arrived);
+    };
+    if (wants_founders && !classic) {
+        // Fifty bodies nobody designed, a family of each that does not hunt, with the
+        // reflexes wired by hand: those that eat some meat can strike a smaller body.
+        for (const auto& body : bodies) {
+            if (phd::diet_of(body) == phd::Diet::carnivore) continue;
+            world.settle(body, family, phd::brain::founder(phd::diet_of(body) != phd::Diet::herbivore, true));
+        }
+    } else if (wants_founders) {
+        auto founder_brains = phd::FounderBrains::hand_wired();
+        std::vector<std::uint8_t> file;
+        if (!founders.empty() && (!phd::read_file(founders, file) || !phd::FounderBrains::decode(file.data(), file.size(), founder_brains))) {
+            std::fprintf(stderr, "could not read founder brains from %s\n", founders.c_str());
+            return 1;
+        }
+        world.seed_animals(animals > 0 ? animals : 48, founder_brains);
     }
     if (brains) world.set_brain_mode(*brains);
     const long long initial_ticks = skip_ticks.value_or(shoreline_study && load.empty() ? 120 : 0);
     for (long long t = 0; t < initial_ticks; ++t) {
-        world.step();
+        step();
     }
     gfx::WorldView view;
     if (!view.init(world)) {
         return 1;
     }
 
-    gfx::TiltView tilt(relief, shoreline_study);
+    actions.set_time(double(world.tick()));
+    gfx::TiltView tilt(actions, relief, shoreline_study);
     if (!tilt.init(world)) {
         return 1;
     }
 
-    const int view_height = height - bar_height;
-    // The world is drawn at 1/pixel of the window's size (its logical size,
-    // so a scaled desktop and the Pi's panel give the same pixel grid), then
-    // scaled up by whole pixels.
-    const int art_w = width / pixel, art_h = (view_height + pixel - 1) / pixel;
+    int view_height;
+    const auto measure_window = [&] {
+        SDL_GetWindowSize(window, &window_w, &window_h);
+        width = std::max(1, int(std::lround(window_w * input_x)));
+        height = std::max(1, int(std::lround(window_h * input_y)));
+        view_height = std::max(1, height - bar_height);
+    };
+    measure_window();
     gfx::PixelTarget target;
-    const bool target_ok = target.init(art_w, art_h);
-    tilt.set_target_alpha(target.has_alpha());
-    if (!target_ok) {
-        return 1;
-    }
+    gfx::TerrainBatch terrain_batch;
+    double bake_ms = 0;
+    gl::GLint texture_limit, depth_limit;
+    gl::GetIntegerv(gl::MAX_TEXTURE_SIZE, &texture_limit);
+    gl::GetIntegerv(gl::MAX_RENDERBUFFER_SIZE, &depth_limit);
+    const int target_limit = std::max(1, std::min(texture_limit, depth_limit));
     Camera camera;
+    camera.tree_xray = start_xray;
+    camera.top_down = start_top_down;
     camera.shoreline_study = shoreline_study;
     if (dev_map && at_x < 0 && at_y < 0) {
         at_x = 62; // the level pad, with the wood to the west and the lake to the east
@@ -332,6 +421,11 @@ int main(int argc, char** argv) {
     int speed = start_speed.value_or(shoreline_study && !dev_map ? 0 : 1);
     long long tilt_frame = 0;
     bool hud = !shoreline_study, running = true;
+    bool kinds_shown = !world.animals().empty(); // the list of what is alive: K
+    struct KindRow { int living; std::string name; };
+    std::vector<KindRow> kind_rows;
+    int kinds_alive = 0;
+    double kinds_counted = -10;
     double study_animation = start_phase; // the pose in the reference frame, or the one asked for
     double accumulator = 0, tick_ms = 0, frame_ms = 0, fps = 60, last_frame = now_seconds();
     double last_save = last_frame;
@@ -425,29 +519,48 @@ int main(int argc, char** argv) {
         x1 = x0 + 40.0f;
     };
 
+    const float xray_left = 180, xray_right = xray_left + font.width("TREE X-RAY", 2) + 12;
     while (running) {
         const double frame_start = now_seconds();
         if (bench_frames && frame_samples.empty()) bench_start = frame_start;
-        int window_w = width, window_h = height;
-        SDL_GetWindowSize(window, &window_w, &window_h);
-        const float input_x = float(width) / float(std::max(1, window_w));
-        const float input_y = float(height) / float(std::max(1, window_h));
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = false;
+            } else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                const int old_width = width, old_height = view_height;
+                measure_window();
+                if (width != old_width || view_height != old_height) {
+                    zoom_anchor_x *= float(width) / old_width;
+                    zoom_anchor_y *= float(view_height) / old_height;
+                    held.clear();
+                    dragging = false;
+                    press_time = 0;
+                    clamp_camera();
+                }
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_RIGHT &&
                        float(event.button.y) * input_y < float(view_height)) {
                 inspected = cell_at(float(event.button.x) * input_x, float(event.button.y) * input_y);
             } else if (event.type == SDL_KEYDOWN) {
                 switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE: running = false; break;
+                case SDLK_F11:
+                    if (!event.key.repeat) {
+                        const bool fullscreen = SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN;
+                        if (SDL_SetWindowFullscreen(window, fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP) < 0) {
+                            status = "FULLSCREEN UNAVAILABLE";
+                            status_until = now_seconds() + 2;
+                        }
+                    }
+                    break;
                 case SDLK_SPACE: speed = speed == 0 ? 1 : 0; break;
                 case SDLK_1: speed = 0; break;
                 case SDLK_2: speed = 1; break;
                 case SDLK_3: speed = 2; break;
                 case SDLK_4: speed = 3; break;
                 case SDLK_h: hud = !hud; break;
+                case SDLK_k: kinds_shown = !kinds_shown; break;
+                case SDLK_x: if (!event.key.repeat) camera.tree_xray = !camera.tree_xray; break;
                 case SDLK_t: camera.top_down = !camera.top_down; break;
                 case SDLK_g:
                     tilt_enabled = !tilt_enabled;
@@ -470,6 +583,7 @@ int main(int argc, char** argv) {
                 zoom_anchor_y = p.y;
             } else if (p.type == ui::Pointer::down) {
                 if (p.y >= view_height) {
+                    if (p.x >= xray_left && p.x < xray_right) camera.tree_xray = !camera.tree_xray;
                     for (int i = 0; i < 4; ++i) {
                         float x0, x1;
                         button_rect(i, x0, x1);
@@ -594,25 +708,24 @@ int main(int argc, char** argv) {
             accumulator += dt * ticks_per_second * speeds[speed].multiplier;
             ticks = int(accumulator);
             accumulator -= ticks;
-        } else {
+        } else if (speeds[speed].multiplier < 0) {
             accumulator = 0;
         }
         const double sim_start = now_seconds();
         const bool flat_out = speeds[speed].multiplier < 0;
         int done = 0;
         while (flat_out ? now_seconds() - sim_start < 0.010 : done < ticks) {
-            world.step();
+            step();
             ++done;
         }
+        actions.set_time(double(world.tick()) + accumulator);
         if (done) {
             const double ms = (now_seconds() - sim_start) * 1000.0 / done;
             tick_ms = tick_ms == 0 ? ms : tick_ms * 0.9 + ms * 0.1;
         }
-        const bool tilted = tilt_enabled && camera.tilted();
+        const float live_opacity = tilt_enabled ? camera.live_opacity() : 0.0f;
+        const bool live = live_opacity > 0;
         const bool capture = !shot.empty();
-        // The painted study needs at most one coarse chunk per interactive frame.
-        const double bake_budget = shoreline_study && tilted ? 0.0 : bake_budget_seconds;
-        const bool terrain_ready = view.refresh(world, camera, width, view_height, bake_budget, tilted, capture);
         if (frame_start - last_save > autosave_seconds) {
             save();
         }
@@ -620,45 +733,54 @@ int main(int argc, char** argv) {
         // Drawing.
         int drawable_w = width, drawable_h = height;
         SDL_GL_GetDrawableSize(window, &drawable_w, &drawable_h);
+        // Allocate once per drawn size, after any queued resize events.
+        // Round up so odd dimensions also have art under the last row and column.
+        // Keep the low profile's world buffer near the Pi LCD's drawing cost as the window grows.
+        const int profile_pixel = low_performance ? std::max({2, (width - 1) / 400 + 1, (view_height - 1) / 240 + 1}) : 2;
+        const int pixel = std::max(requested_pixel.value_or(profile_pixel), (std::max(width, view_height) - 1) / target_limit + 1);
+        const int art_w = (width - 1) / pixel + 1, art_h = (view_height - 1) / pixel + 1;
+        if (target.width() != art_w || target.height() != art_h) {
+            if (!target.init(art_w, art_h)) return 1;
+            tilt.set_target_alpha(target.has_alpha());
+        }
         const Camera art_camera = camera.for_target(float(pixel));
+        // One publication boundary for the overview, its reduced resolutions,
+        // the live fallback and the painted ground, including during the zoom fade.
+        const double bake_start = now_seconds();
+        const auto previous_uploads = view.uploaded_chunks();
+        auto* next_batch = terrain_batch.begin(capture) ? &terrain_batch : nullptr;
+        bool terrain_ready = view.refresh(world, camera, width, view_height, live_opacity, next_batch);
+        if (live) terrain_ready = tilt.schedule_ground(world, art_camera, art_w, art_h, next_batch) && terrain_ready;
+        if (next_batch) next_batch->finish(world, capture);
+        const int uploaded_chunks = int(view.uploaded_chunks() - previous_uploads);
+        bake_ms = bake_ms * 0.9 + (now_seconds() - bake_start) * 1000.0 * 0.1;
+        if (capture) terrain_ready = true;
         bool scene_ready = true;
-        if (tilted) {
+        if (live) {
             // The animals have a picture of their own, drawn before the frame's.
             tilt.prepare_animals(world, art_camera, art_w, art_h, art_h, shoreline_study ? study_animation : frame_start);
         }
-        target.begin();
-        if (tilted) {
-            if (++tilt_frame % 15 == 0 || capture) {
-                tilt.refresh(world, 2);
-            }
-            if (shoreline_study && speed != 0) {
-                study_animation += dt;
-            }
-            scene_ready = tilt.draw(world, art_camera, view.terrain(), font, art_w, art_h, art_h,
-                                    shoreline_study ? study_animation : frame_start, capture);
-            // Firelight on what is around a fire, then the sky over it all:
-            // cloud shadows, fog, rain, snow and lightning.
-            batch.begin(art_w, art_h);
-            gl::BlendFunc(gl::DST_COLOR, gl::ONE);
-            view.draw_firelight(batch, world, art_camera, art_w, art_h, shoreline_study ? study_animation : frame_start);
-            batch.end();
-            tilt.draw_fire();
-            batch.begin(art_w, art_h);
-            view.draw(batch, font, world, art_camera, art_w, art_h, shoreline_study ? study_animation : frame_start, true);
-            batch.end();
-        } else {
+        const phd::Animal* selected = watched ? find_animal(watched) : nullptr;
+        const gfx::Texture* portrait = selected ? tilt.portrait(*selected, int(panel_width - 20) / 2, 44) : nullptr;
+        // Present each complete world image before reusing its render target.
+        // Map markers sit under the live image, so they fade with the baked crowns.
+        int world_draws = 0;
+        const auto present_world = [&](std::uint8_t alpha) {
+            target.end(drawable_w, drawable_h);
+            batch.begin(width, height);
+            batch.quad(target.texture(), 0, 0, float(art_w * pixel), float(art_h * pixel), 0, 1, 1, 0,
+                       {255, 255, 255, alpha});
+        };
+        gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+        gl::ClearColor(0.04f, 0.05f, 0.05f, 1);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+        if (live_opacity < 1) {
+            target.begin();
             batch.begin(art_w, art_h);
             view.draw(batch, font, world, art_camera, art_w, art_h, frame_start);
             batch.end();
-        }
-        const int world_draws = batch.draw_calls() + (tilted ? tilt.draw_calls() : 0);
-        target.end(drawable_w, drawable_h);
-        gl::ClearColor(0.04f, 0.05f, 0.05f, 1);
-        gl::Clear(gl::COLOR_BUFFER_BIT);
-        batch.begin(width, height);
-        // The framebuffer's rows run bottom to top.
-        batch.quad(target.texture(), 0, 0, float(art_w * pixel), float(art_h * pixel), 0, 1, 1, 0, white);
-        if (!tilted) {
+            world_draws += batch.draw_calls();
+            present_world(255);
             // On the map every animal is a dot in its own colour, on the art's
             // pixel grid: bigger for a bigger body and as the view closes in,
             // dimmed with the daylight like the land under it. One in the air
@@ -693,7 +815,36 @@ int main(int argc, char** argv) {
                 }
                 font.rect(batch, x0, y0, x1, y1, {tone(body.primary.r, k), tone(body.primary.g, k), tone(body.primary.b, k), 255});
             }
+            batch.end();
+            world_draws += batch.draw_calls();
         }
+        if (live) {
+            target.begin();
+            if (++tilt_frame % 15 == 0 || capture) {
+                tilt.refresh(world, 2);
+            }
+            if (shoreline_study && speed != 0) {
+                study_animation += dt;
+            }
+            scene_ready = tilt.draw(world, art_camera, view.live_terrain(), font, art_w, art_h, art_h,
+                                    shoreline_study ? study_animation : frame_start, capture);
+            // Firelight on what is around a fire, then the sky over it all:
+            // cloud shadows, fog, rain, snow and lightning.
+            batch.begin(art_w, art_h);
+            gl::BlendFunc(gl::DST_COLOR, gl::ONE);
+            view.draw_firelight(batch, world, art_camera, art_w, art_h, shoreline_study ? study_animation : frame_start);
+            batch.end();
+            world_draws += batch.draw_calls();
+            tilt.draw_fire();
+            batch.begin(art_w, art_h);
+            view.draw(batch, font, world, art_camera, art_w, art_h, shoreline_study ? study_animation : frame_start, true);
+            batch.end();
+            world_draws += batch.draw_calls() + tilt.draw_calls();
+            present_world(std::uint8_t(std::lround(live_opacity * 255)));
+            batch.end();
+            world_draws += batch.draw_calls();
+        }
+        batch.begin(width, height);
         if (inspected >= 0) {
             // Outline the cell, projected through the camera at its ground height.
             const float x = float(inspected % world.width()), y = float(inspected / world.width());
@@ -701,7 +852,7 @@ int main(int argc, char** argv) {
             float px[4], py[4];
             const float corner_x[4] = {x, x + 1, x + 1, x}, corner_y[4] = {y, y, y + 1, y + 1};
             for (int k = 0; k < 4; ++k) {
-                const float z = tilted ? tilt.ground(corner_x[k], corner_y[k]) : camera.focus_z;
+                const float z = live ? tilt.ground(corner_x[k], corner_y[k]) : camera.focus_z;
                 camera.to_screen(corner_x[k], corner_y[k], z, float(width), float(view_height), px[k], py[k]);
             }
             font.rect(batch, px[0] - 1, std::min(py[0], py[1]) - 1, px[1] + 1, std::min(py[0], py[1]) + 1, mark);
@@ -711,9 +862,8 @@ int main(int argc, char** argv) {
         }
 
         // The animal inspector: what it is, how it is doing, and its organs.
-        if (const phd::Animal* a = watched ? find_animal(watched) : nullptr) {
+        if (const phd::Animal* a = selected) {
             const phd::Frame f = phd::frame(a->genome, a->growth);
-            const gfx::creature::Body body = gfx::animal_body(a->genome, a->growth);
             // A mark at its feet.
             float sx, sy;
             const float reach = animal_on_screen(*a, sx, sy);
@@ -730,62 +880,18 @@ int main(int argc, char** argv) {
             // What its organs make it, in a word; there are no kinds of animal.
             const char* plan = f.air_speed ? "FLIER" : !f.breathes_air ? "SWIMMER" : f.breathes_water || f.fin ? "AMPHIBIAN"
                                : f.leg_pairs ? "WALKER" : "CRAWLER";
-            font.text(batch, left, 10, format("%s %u", plan, a->id), 2, accent);
-            font.text(batch, left, 30, format("AGE %d DAYS  YOUNG %d", a->age, a->young), 2, dim);
+            // And what it is called: its own kind's name, then its species and family.
+            const auto place = taxa.classify(a->genome);
+            const auto fitted = [&](float at, const std::string& text, gfx::Color color) {
+                font.text(batch, left, at, text, font.width(text, 2) <= right - left ? 2 : 1, color);
+            };
+            fitted(4, taxa.common(place), accent);
+            fitted(20, taxa.name(place), white);
+            fitted(35, format("%s  %s %u", taxa.family(place).c_str(), plan, a->id), dim);
 
-            // Its organs, from the side, to scale with each other: trunk, neck
-            // and head, tail, legs, a wing over its back, fins.
-            {
-                const auto shade = [](gfx::Color c, float k) {
-                    return gfx::Color{std::uint8_t(c.r * k), std::uint8_t(c.g * k), std::uint8_t(c.b * k), 255};
-                };
-                const float span = body.tail + body.length + body.neck + body.head + body.snout;
-                const float tall = body.leg_length + body.girth * 2 + std::max(body.wing * 0.45f, body.dorsal_fin);
-                const float scale = std::min((right - left) / span, 78.0f / std::max(tall, 0.01f));
-                const float x0 = left + ((right - left) - span * scale) / 2;
-                const float top = 52 + std::max(body.wing * 0.45f, body.dorsal_fin) * scale + 4;
-                const float back = top, belly = top + body.girth * 2 * scale, mid = (back + belly) / 2;
-                const float hip = x0 + body.tail * scale, shoulder = hip + body.length * scale;
-                font.rect(batch, x0, mid - std::max(1.5f, body.girth * 0.3f * scale), hip + 2, mid + std::max(1.5f, body.girth * 0.3f * scale),
-                          shade(body.primary, 0.85f));
-                if (body.tail_fin > 0) {
-                    font.rect(batch, x0 - body.tail_fin * scale * 0.5f, mid - body.tail_fin * scale, x0 + 2, mid + body.tail_fin * scale,
-                              shade(body.primary, 0.7f));
-                }
-                for (int k = 0; k < body.leg_pairs; ++k) {
-                    const float at = body.leg_pairs == 1 ? 0.5f : float(k) / float(body.leg_pairs - 1);
-                    const float lx = hip + 4 + (shoulder - hip - 8) * at, wide = std::max(1.5f, body.leg_girth * scale);
-                    font.rect(batch, lx - wide, belly - 2, lx + wide, belly + body.leg_length * (1 - 0.5f * body.sprawl) * scale,
-                              shade(body.primary, 0.6f));
-                }
-                font.rect(batch, hip, back, shoulder, belly, body.primary);
-                if (body.pattern == gfx::creature::Pattern::pale_belly) {
-                    font.rect(batch, hip, belly - body.girth * 0.6f * scale, shoulder, belly, body.secondary);
-                } else if (body.pattern != gfx::creature::Pattern::plain) {
-                    for (float bx = hip + 4; bx < shoulder - 3; bx += 9) {
-                        const bool stripes = body.pattern == gfx::creature::Pattern::stripes;
-                        font.rect(batch, bx, stripes ? back : mid - 3, bx + 3, stripes ? belly : mid, body.secondary);
-                    }
-                }
-                const float head = body.head * scale, neck_end = shoulder + body.neck * scale;
-                const float lift = f.leg_pairs && !f.fin ? body.neck * scale * 0.6f : 0;
-                font.rect(batch, shoulder - 2, mid - lift - head * 0.7f, neck_end + 1, mid - lift * 0.3f + head * 0.7f, shade(body.primary, 0.92f));
-                font.rect(batch, neck_end, mid - lift - head, neck_end + (body.head + body.snout) * scale, mid - lift + head, body.primary);
-                font.rect(batch, neck_end + head * 0.7f, mid - lift - head * 0.5f, neck_end + head * 0.7f + 2, mid - lift - head * 0.5f + 2,
-                          {20, 20, 24, 255});
-                if (body.wing > 0) {
-                    font.rect(batch, hip + (shoulder - hip) * 0.25f, back - body.wing * 0.45f * scale, hip + (shoulder - hip) * 0.8f, back + 2,
-                              shade(body.primary, 0.75f));
-                }
-                if (body.dorsal_fin > 0) {
-                    font.rect(batch, hip + (shoulder - hip) * 0.35f, back - body.dorsal_fin * scale, hip + (shoulder - hip) * 0.7f, back + 1,
-                              shade(body.primary, 0.7f));
-                    font.rect(batch, hip + (shoulder - hip) * 0.55f, belly - 1, hip + (shoulder - hip) * 0.75f, belly + body.side_fins * scale * 0.6f,
-                              shade(body.primary, 0.7f));
-                }
-            }
+            if (portrait) batch.quad(*portrait, left, 52, right, 140, 0, 1, 1, 0, white);
 
-            // Bars: energy, health, breath.
+            // Bars: its reserve of food, its wind, health, breath.
             float y = 146;
             const auto bar = [&](const char* name, int value, int full, gfx::Color color) {
                 font.text(batch, left, y, name, 2, white);
@@ -794,17 +900,28 @@ int main(int argc, char** argv) {
                 font.rect(batch, x0, y + 1, x0 + (x1 - x0) * std::clamp(float(value) / float(std::max(1, full)), 0.0f, 1.0f), y + 13, color);
                 y += 20;
             };
-            bar("ENERGY", a->energy, f.store, {214, 178, 72, 255});
+            bar("SATIETY", a->energy, f.store, {214, 178, 72, 255});
+            bar("ENERGY", a->stamina, f.stamina, {122, 196, 110, 255});
             bar("HEALTH", a->health, 255, {188, 84, 70, 255});
             bar("BREATH", a->breath, phd::breath_ticks, {96, 168, 204, 255});
 
             const auto medium = phd::Medium(a->medium);
-            const char* doing = a->pain ? "HURT" : (a->wants & phd::wants_attack) ? "STRIKING"
-                                : a->eating < 4 ? "FEEDING" : medium == phd::Medium::air ? "FLYING" : medium == phd::Medium::water ? "SWIMMING"
-                                : a->pace == 0 ? "RESTING" : "WALKING";
+            const char* doing = a->pain ? "HURT" : medium == phd::Medium::air ? "FLYING" :
+                                medium == phd::Medium::water ? "SWIMMING" : (a->wants & phd::wants_rest) ? "SLEEPING" :
+                                a->pace == 0 ? "RESTING" : a->pace > phd::cruise_pace && a->stamina > 0 ? "SPRINTING" : "WALKING";
+            using gfx::creature::Action;
+            switch (actions.gesture(*a).action) {
+            case Action::feed: doing = "FEEDING"; break;
+            case Action::mate: doing = "MATING"; break;
+            case Action::strike: doing = "STRIKING"; break;
+            case Action::recoil: doing = "RECOILING"; break;
+            case Action::call: doing = "CALLING"; break;
+            case Action::idle: break;
+            }
             const auto speed = [](int v) { return double(v) * phd::cell_decimetres / 256.0; }; // m a second
             std::vector<std::string> lines = {
                 doing,
+                format("AGE %d DAYS  YOUNG %d", a->age, a->young),
                 a->growth < 255 ? format("JUVENILE %d%% GROWN", (a->growth - phd::newborn_growth) * 100 / (255 - phd::newborn_growth))
                                 : a->drive >= phd::mating_drive ? std::string("SEEKING A MATE") : std::string("ADULT"),
                 a->mother ? format("OF %u AND %u", a->mother, a->father) : std::string("A FOUNDER"),
@@ -818,8 +935,10 @@ int main(int argc, char** argv) {
                             (f.fin ? "  FINS" : ""));
             const bool grazes = a->genome.gene[phd::agene_plant_gut] >= 32;
             const bool eats_meat = a->genome.gene[phd::agene_meat_gut] >= 32;
-            lines.push_back(grazes ? (eats_meat ? "EATS PLANTS AND MEAT" : "EATS PLANTS")
-                                   : (eats_meat ? "EATS MEAT" : "NO DIGESTIVE GUT"));
+            lines.push_back(!grazes && !eats_meat ? "NO DIGESTIVE GUT" : phd::diet_name(phd::diet_of(a->genome)));
+            lines.push_back(format("GUT PLANT %d MEAT %d", a->genome.gene[phd::agene_plant_gut], a->genome.gene[phd::agene_meat_gut]));
+            lines.push_back(format("HARD MOUTH %d HEAD %d BACK %d", a->genome.gene[phd::agene_hard_mouth],
+                                   a->genome.gene[phd::agene_hard_front], a->genome.gene[phd::agene_hard_back]));
             lines.push_back(format("LAND %.1f WATER %.1f", speed(f.land_speed), speed(f.water_speed)));
             if (f.air_speed) {
                 lines.push_back(format("AIR %.1f M/S", speed(f.air_speed)));
@@ -897,9 +1016,15 @@ int main(int argc, char** argv) {
             font.text(batch, (bx0 + bx1 - tw) / 2, float(view_height) + 9, speeds[i].label, 2,
                       i == speed ? accent : dim);
         }
-        font.text(batch, 188, float(view_height) + 9, clock_label(world.tick()), 2, white);
-        const auto right = format("SEED %u", world.seed());
-        font.text(batch, float(width) - font.width(right, 2) - 8, float(view_height) + 9, right, 2, dim);
+        font.rect(batch, xray_left, float(view_height) + 4, xray_right, float(height) - 4,
+                  camera.tree_xray ? gfx::Color{40, 80, 55, 255} : gfx::Color{30, 36, 33, 255});
+        font.text(batch, xray_left + 6, float(view_height) + 9, "TREE X-RAY", 2, camera.tree_xray ? accent : dim);
+        const auto clock = clock_label(world.tick()), seed_label = format("SEED %u", world.seed());
+        const float clock_x = xray_right + 10, bar_y = float(view_height) + 9;
+        const int clock_scale = clock_x + font.width(clock, 2) + 4 <= width ? 2 : 1;
+        if (clock_x + font.width(clock, clock_scale) <= width) font.text(batch, clock_x, bar_y, clock, clock_scale, white);
+        const float seed_x = float(width) - font.width(seed_label, 2) - 8;
+        if (seed_x > clock_x + font.width(clock, clock_scale) + 4) font.text(batch, seed_x, bar_y, seed_label, 2, dim);
 
         // The budget HUD.
         if (hud) {
@@ -909,14 +1034,41 @@ int main(int argc, char** argv) {
                 format("FRAME %.2f MS  %.0f FPS  ZOOM %.0f  PITCH %.0f%s", frame_ms, fps, camera.zoom,
                        camera.pitch(), camera.top_down ? " LOCK" : tilt_enabled ? "" : " FLAT"),
                 format("DRAWS %d  TRIS %d  BAKE %.2f MS  %dX%d Z%d", world_draws + batch.draw_calls(),
-                       tilted ? tilt.triangles() : 0, view.bake_ms(), art_w, art_h, target.depth_bits()),
+                       live ? tilt.triangles() : 0, bake_ms, art_w, art_h, target.depth_bits()),
                 format("SIM %.2f MB  RSS %.1f MB", world.memory_bytes() / 1048576.0, resident_bytes() / 1048576.0),
                 format("FRONTS %d  WIND %d  TREES %d  %s", int(world.fronts().size()), world.wind_speed(),
-                       tilted ? tilt.trees() : 0, gl::is_es() ? "GLES" : "GL"),
+                       live ? tilt.trees() : 0, gl::is_es() ? "GLES" : "GL"),
             };
             font.rect(batch, 4, 4, 4 + 6 * 2 * 44 + 8, 4 + 5 * 18 + 6, panel);
             for (int i = 0; i < 5; ++i) {
                 font.text(batch, 10, 10 + float(i) * 18, lines[i], 2, i == 0 && pi_ms > pi_tick_budget_ms ? warn : white);
+            }
+        }
+        // What is alive, most numerous first. Counted every couple of seconds.
+        if (kinds_shown) {
+            if (now_seconds() - kinds_counted > 2) {
+                kinds_counted = now_seconds();
+                taxa.census(world.animals());
+                kind_rows.clear();
+                for (std::size_t s = 0; s < taxa.species().size(); ++s) {
+                    const auto& races = taxa.species()[s].subspecies;
+                    for (std::size_t r = 0; r < races.size(); ++r) {
+                        if (!races[r].living) continue;
+                        const phd::Diet diet = phd::diet_of(races[r].type);
+                        const char* eats = diet == phd::Diet::herbivore ? "HERB" : diet == phd::Diet::omnivore ? "OMNI" : "CARN";
+                        kind_rows.push_back({races[r].living, std::string(eats) + " " + taxa.common({int(s), int(r)})});
+                    }
+                }
+                kinds_alive = int(kind_rows.size());
+                std::stable_sort(kind_rows.begin(), kind_rows.end(), [](const KindRow& a, const KindRow& b) { return a.living > b.living; });
+                if (kind_rows.size() > 12) kind_rows.resize(12);
+            }
+            const float top = hud ? 4 + 5 * 18 + 6 + 6 : 4;
+            font.rect(batch, 4, top, 4 + 6 * 2 * 34 + 8, top + float(kind_rows.size() + 1) * 18 + 8, panel);
+            font.text(batch, 10, top + 6, format("%d KINDS ALIVE  %d ANIMALS", kinds_alive, int(world.animals().size())), 2, accent);
+            for (std::size_t i = 0; i < kind_rows.size(); ++i) {
+                const std::string line = format("%4d %s", kind_rows[i].living, kind_rows[i].name.c_str());
+                font.text(batch, 10, top + 6 + float(i + 1) * 18, line, font.width(line, 2) <= 6 * 2 * 34 ? 2 : 1, white);
             }
         }
         if (now_seconds() < status_until) {
@@ -946,16 +1098,21 @@ int main(int argc, char** argv) {
                 }
                 std::printf("frames=%zu frame_ms_mean=%.2f frame_ms_p99=%.2f frame_ms_max=%.2f tick_ms=%.3f bake_ms=%.2f ground_ms=%.2f ground_ms_max=%.2f "
                             "ticks=%" PRIu64 " triangles=%d sprites=%d draws=%d atlas=%d%s "
-                            "frame_ms_first=%.2f detail_ready_frame=%d detail_ready_ms=%.2f bake_chunks_last=%d\n",
+                            "frame_ms_first=%.2f detail_ready_frame=%d detail_ready_ms=%.2f bake_chunks_last=%d "
+                            "performance=%s art=%dx%d\n",
                             sorted.size(), sum / double(sorted.size()), sorted[sorted.size() * 99 / 100], sorted.back(),
-                            tick_ms, view.bake_ms(), tilt.ground_ms(), tilt.ground_ms_max(), world.tick(), tilted ? tilt.triangles() : 0,
-                            tilted ? tilt.sprites() : 0, tilted ? tilt.draw_calls() : 0, tilt.atlas_sprites(),
+                            tick_ms, bake_ms, tilt.ground_ms(), tilt.ground_ms_max(), world.tick(), live ? tilt.triangles() : 0,
+                            live ? tilt.sprites() : 0, live ? tilt.draw_calls() : 0, tilt.atlas_sprites(),
                             tilt.atlas_full() ? " (full)" : "", frame_samples.front(), detail_ready_frame,
-                            detail_ready_ms, view.chunks_per_frame());
+                            detail_ready_ms, uploaded_chunks, low_performance ? "low" : "desktop", art_w, art_h);
                 running = false;
             }
         }
         SDL_GL_SwapWindow(window);
+        if (low_performance && !bench_frames && running) {
+            const double remaining = 1.0 / 30.0 - (now_seconds() - frame_start);
+            if (remaining > 0) SDL_Delay(Uint32(std::ceil(remaining * 1000.0)));
+        }
         const double interval = now_seconds() - frame_start;
         if (interval > 0) {
             fps = fps * 0.95 + (1.0 / interval) * 0.05;

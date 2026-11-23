@@ -73,7 +73,7 @@ Corner gather(const phd::World& world, int x, int y) {
     // would dam a channel one cell wide at every corner between its banks,
     // so a corner on a channel lies as low as the channel does: that is cut
     // where a stream can run, not where one is running.
-    out.bed = float(bed_sum_dm) * 0.025f;
+    out.painted_bed = out.bed = float(bed_sum_dm) * 0.025f;
     if (channels) {
         out.channel = true;
         out.bed = std::min(out.bed, channel_bed / float(channels));

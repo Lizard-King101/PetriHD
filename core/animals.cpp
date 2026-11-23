@@ -6,25 +6,16 @@
 #include <stdexcept>
 #include <vector>
 
+#include "fnv.hpp"
 #include "math.hpp"
+#include "tuning.hpp"
 #include "world.hpp"
-#ifdef PETRIHD_SWIMMER_TRACE
-#include "swimmer_trace.hpp"
-#endif
 
 namespace phd {
 namespace {
 
 constexpr std::uint32_t purpose_animals = 5;
 constexpr const char* brain_mode_names[] = {"evolving", "frozen", "shuffled", "neutral"};
-
-// Founders. Each is mutated a little as it is placed.
-//                           size bld  legs lleg sprl fins tail wing neck gill plnt meat fat  hue  tone patt ptone matr invs eyes nose ears voic
-const AnimalGenome grazer {{ 108, 100, 140, 200,   0,   0,  60,   0, 190,   0, 220,   0,  90,  22, 150, 230, 215,  64, 220, 110, 120, 120,  60}};
-const AnimalGenome crawler{{  48,  90, 210, 130, 230,   0, 130,   0,  30,  40, 200,  40,  60,   8, 110,  80,  40,  96, 120,  60, 160,  60, 140}};
-const AnimalGenome flier  {{  38, 130,  80, 110,  30,   0, 150, 200,  40,   0, 210,   0,  20, 160,  95, 230, 200,  64, 150, 200,  60, 160, 220}};
-const AnimalGenome fish   {{  18, 150,   0,   0,   0, 200, 170,   0,  10, 255, 210,   0,  40,  32, 160, 230, 220,  32,  40,  80, 120,  80,  20}};
-const AnimalGenome swimmer{{  78, 110,   0,   0,   0, 220, 230,   0,  10, 255, 200,  60,  70, 140, 130, 150, 225, 128, 200, 120, 120, 100,  90}};
 
 constexpr int mm_per_cell = cell_decimetres * 100;
 
@@ -72,6 +63,8 @@ Frame frame(const AnimalGenome& genome, int growth) {
     mass += trunk * (g(agene_plant_gut) + g(agene_meat_gut)) / 255 / 10;
     mass += trunk * g(agene_fat) / 255 / 4;
     mass += trunk * (g(agene_eyes) + g(agene_nose) + g(agene_ears)) / 255 / 20;
+    // Hard tissue is heavy, and there is far more back than mouth to cover.
+    mass += trunk * (g(agene_hard_mouth) + 2 * g(agene_hard_front) + 4 * g(agene_hard_back)) / 255 / 20;
     f.mass = int(std::clamp<std::int64_t>(mass, 1, 2000000));
     const auto root = std::int64_t(isqrt(std::uint64_t(f.mass)));
     f.mass75 = std::max(1, int(isqrt(std::uint64_t(root * root * root))));
@@ -93,43 +86,48 @@ Frame frame(const AnimalGenome& genome, int growth) {
     f.hearing = g(agene_ears) < 32 ? 0 : 4 + g(agene_ears) / 8;
     f.wade = f.leg_pairs ? f.leg * 3 / 4 + f.girth / 2 : f.girth;
     f.upkeep = 1 + f.mass75 / 32 + f.mass75 * (g(agene_eyes) + g(agene_nose) + g(agene_ears)) / 255 / 256; // senses cost a little
+    f.upkeep = std::max(1, f.upkeep * tuning::upkeep_percent / 100);
     f.store = f.mass75 * (4 + g(agene_fat) / 32) + 64;
     f.bite = std::clamp(f.mass75 / 100, 2, 160); // a mouthful grows with the body, as its needs do
+    // Wind for 32 to 96 ticks flat out: fat is a reserve to carry and a weight to tire under.
+    f.stamina = (255 - cruise_pace + 1) * (32 + (255 - g(agene_fat)) / 4);
     return f;
 }
 
-void World::seed_training_pair(const brain::Brain& left, const brain::Brain& right, int start_energy_percent, int gap_cells) {
-    if (config_.layout != Layout::training_pond || tick_ || has_had_animals() ||
-        start_energy_percent < 1 || start_energy_percent > 100 || gap_cells < 1 || gap_cells > width() - 4)
-        throw std::invalid_argument("Invalid training pair setup");
-    Random rng(stream_seed(seed(), purpose_animals));
-    const int left_cell = (width() - gap_cells - 1) / 2;
-    for (int i = 0; i < 2; ++i) {
-        Animal a{};
-        a.genome = swimmer;
-        a.genome.gene[agene_hue] += std::uint8_t(i * 4); // two fixed, compatible bodies
-        a.id = next_animal_id_++;
-        a.lineage = a.id; a.stock = FishStock::large_swimmer; a.medium = std::uint8_t(Medium::water);
-        a.growth = a.health = 255; a.breath = breath_ticks;
-        a.energy = frame(a.genome).store * start_energy_percent / 100;
-        a.x = (left_cell + i * gap_cells) * 256 + 128;
-        a.y = (height() / 2) * 256 + 128;
-        a.heading = std::uint8_t(i * 128 + int(rng.below(65)) - 32);
-        animals_.push_back(a); brains_.push_back(i ? right : left);
+std::uint32_t World::add_animal(const AnimalGenome& genome, int x, int y, std::uint8_t heading, int energy_percent,
+                                const brain::Brain& brain, FishStock stock) {
+    if (x < 256 || y < 256 || (x >> 8) >= width() - 1 || (y >> 8) >= height() - 1 || int(animals_.size()) >= max_animals) {
+        return 0;
     }
+    const Frame f = frame(genome);
+    const auto cell = std::size_t(y >> 8) * width() + std::size_t(x >> 8);
+    const int depth = Water(water_[cell]) == Water::none ? 0 : depth_[cell] * 100;
+    Animal a{};
+    a.genome = genome;
+    a.id = next_animal_id_++;
+    a.lineage = a.id;
+    a.stock = stock;
+    a.x = x;
+    a.y = y;
+    a.heading = heading;
+    a.medium = std::uint8_t(depth > f.wade ? Medium::water : Medium::land);
+    a.health = 255;
+    a.stamina = std::uint16_t(f.stamina);
+    a.growth = 255;
+    a.breath = breath_ticks;
+    a.energy = int(std::int64_t(f.store) * std::clamp(energy_percent, 1, 100) / 100);
+    animals_.push_back(a);
+    brains_.push_back(brain);
     index_animals();
+    return a.id;
 }
 
-void World::seed_animals(int count, const brain::Brain& swimmer_brain) {
-    seed_animals(count, std::vector<brain::Brain>{swimmer_brain});
-}
-
-void World::seed_animals(int count, const std::vector<brain::Brain>& swimmer_pool) {
-    if (swimmer_pool.empty()) throw std::invalid_argument("Large-swimmer founder pool is empty");
-    std::size_t next_swimmer = 0;
+void World::seed_animals(int count, const FounderBrains& brains, unsigned without) {
+    if (!brains.complete()) throw std::invalid_argument("Every kind of founder needs at least one brain");
+    std::size_t placed_of[founder_kinds] = {};
     Random rng(stream_seed(config_.seed, purpose_animals));
-    const auto other_brain = brain::founder();
-    const AnimalGenome* founders[] = {&grazer, &grazer, &crawler, &flier, &fish, &fish, &swimmer};
+    using Kind = FounderKind;
+    constexpr Kind founders[] = {Kind::grazer, Kind::grazer, Kind::crawler, Kind::flier, Kind::fish, Kind::fish, Kind::swimmer};
     const int w = config_.width, h = config_.height;
     // Founders start in families: a few of a kind near each other, since one
     // alone on the far side of the map will never find a mate.
@@ -137,16 +135,9 @@ void World::seed_animals(int count, const std::vector<brain::Brain>& swimmer_poo
     std::vector<int> home_x(std::size_t(kinds) * (count / (kinds * family) + 1), -1), home_y(home_x.size(), -1);
     for (int k = 0; k < count && int(animals_.size()) < max_animals; ++k) {
         Animal a{};
-        const AnimalGenome* parent = founders[k % kinds];
-        a.genome = *parent;
-        a.stock = parent == &swimmer ? FishStock::large_swimmer : parent == &fish ? FishStock::small_fish : FishStock::other;
-        for (auto& gene : a.genome.gene) {
-            gene = static_cast<std::uint8_t>(std::clamp(int(gene) + int(rng.below(17)) - 8, 0, 255));
-        }
-        // The body plan is what the founder is; only its proportions vary.
-        for (const auto plan : {agene_legs, agene_fins, agene_wings, agene_gills}) {
-            a.genome.gene[plan] = founders[k % int(std::size(founders))]->gene[plan];
-        }
+        const Kind kind = founders[k % kinds];
+        a.genome = varied_founder(kind, rng);
+        a.stock = founder_stock(kind);
         const Frame f = frame(a.genome);
         // Somewhere it can live: water deep enough to swim in, or dry land.
         bool placed = false;
@@ -175,16 +166,122 @@ void World::seed_animals(int count, const std::vector<brain::Brain>& swimmer_poo
         if (!placed) {
             continue;
         }
+        a.heading = static_cast<std::uint8_t>(rng.below(256));
+        if (without >> unsigned(kind) & 1) {
+            continue;
+        }
         a.id = next_animal_id_++;
         a.lineage = a.id;
-        a.heading = static_cast<std::uint8_t>(rng.below(256));
         a.health = 255;
+        a.stamina = std::uint16_t(frame(a.genome).stamina);
         a.breath = breath_ticks;
         a.energy = f.store * 3 / 4;
         a.growth = 255;
         animals_.push_back(a);
-        brains_.push_back(parent == &swimmer ? swimmer_pool[next_swimmer++ % swimmer_pool.size()] : other_brain);
+        brains_.push_back(brains.pick(kind, placed_of[std::size_t(kind)]++));
     }
+}
+
+int World::settle(const AnimalGenome& body, int count, const brain::Brain& mind) {
+    Fnv1a which;
+    which.bytes(body.gene, agene_count);
+    Random rng(stream_seed(config_.seed ^ mix(tick_), std::uint32_t(which.value())));
+    const int w = config_.width, h = config_.height;
+    int home_x = -1, home_y = -1, settled = 0;
+    for (int k = 0; k < count && int(animals_.size()) < max_animals; ++k) {
+        Animal a{};
+        a.genome = varied(body, rng);
+        const Frame f = frame(a.genome);
+        bool placed = false;
+        for (int attempt = 0; attempt < 600 && !placed; ++attempt) {
+            int x = 2 + int(rng.below(std::uint32_t(w - 4))), y = 2 + int(rng.below(std::uint32_t(h - 4)));
+            if (home_x >= 0 && attempt < 400) {
+                x = std::clamp(home_x + int(rng.below(9)) - 4, 2, w - 3);
+                y = std::clamp(home_y + int(rng.below(9)) - 4, 2, h - 3);
+            }
+            const auto cell = std::size_t(y) * w + x;
+            const int depth = Water(water_[cell]) == Water::none ? 0 : depth_[cell] * 100;
+            if (f.breathes_air ? depth == 0 : depth >= f.girth * 4 && Water(water_[cell]) == Water::lake) {
+                a.x = x * 256 + 128;
+                a.y = y * 256 + 128;
+                a.medium = std::uint8_t(f.breathes_air ? Medium::land : Medium::water);
+                placed = true;
+                if (home_x < 0) { home_x = x; home_y = y; }
+            }
+        }
+        if (!placed) continue;
+        a.id = next_animal_id_++;
+        a.lineage = a.id;
+        a.heading = static_cast<std::uint8_t>(rng.below(256));
+        a.health = 255;
+        a.stamina = std::uint16_t(frame(a.genome).stamina);
+        a.breath = breath_ticks;
+        a.energy = f.store * 3 / 4;
+        a.growth = 255;
+        animals_.push_back(a);
+        brains_.push_back(mind);
+        ++settled;
+    }
+    return settled;
+}
+
+int World::arrive(FounderKind kind, int count, const FounderBrains& brains) {
+    Random rng(stream_seed(config_.seed ^ mix(tick_), 0x61727276u + std::uint32_t(kind)));
+    const int w = config_.width, h = config_.height;
+    constexpr int family = 4;
+    int home_x = -1, home_y = -1, arrived = 0;
+    for (int k = 0; k < count && int(animals_.size()) < max_animals; ++k) {
+        Animal a{};
+        a.genome = varied_founder(kind, rng);
+        a.stock = founder_stock(kind);
+        const Frame f = frame(a.genome);
+        if (k % family == 0) {
+            // A family settles where the most other animals are, of the
+            // places it can live that it tries: a hunter comes to its prey.
+            home_x = -1;
+            int most = -1;
+            for (int attempt = 0; attempt < 400; ++attempt) {
+                const int x = 2 + int(rng.below(std::uint32_t(w - 4))), y = 2 + int(rng.below(std::uint32_t(h - 4)));
+                const auto cell = std::size_t(y) * w + x;
+                const int depth = Water(water_[cell]) == Water::none ? 0 : depth_[cell] * 100;
+                if (!(f.breathes_air ? depth == 0 : depth >= f.girth * 4 && Water(water_[cell]) == Water::lake)) continue;
+                int near = 0;
+                for (const auto& other : animals_) {
+                    near += std::abs((other.x >> 8) - x) <= 6 && std::abs((other.y >> 8) - y) <= 6 && other.medium == std::uint8_t(f.breathes_air ? Medium::land : Medium::water);
+                }
+                if (near > most) { most = near; home_x = x; home_y = y; }
+            }
+        }
+        bool placed = false;
+        for (int attempt = 0; attempt < 600 && !placed; ++attempt) {
+            int x = 2 + int(rng.below(std::uint32_t(w - 4))), y = 2 + int(rng.below(std::uint32_t(h - 4)));
+            if (home_x >= 0 && attempt < 400) {
+                x = std::clamp(home_x + int(rng.below(9)) - 4, 2, w - 3);
+                y = std::clamp(home_y + int(rng.below(9)) - 4, 2, h - 3);
+            }
+            const auto cell = std::size_t(y) * w + x;
+            const int depth = Water(water_[cell]) == Water::none ? 0 : depth_[cell] * 100;
+            if (f.breathes_air ? depth == 0 : depth >= f.girth * 4 && Water(water_[cell]) == Water::lake) {
+                a.x = x * 256 + 128;
+                a.y = y * 256 + 128;
+                a.medium = std::uint8_t(f.breathes_air ? Medium::land : Medium::water);
+                placed = true;
+                if (home_x < 0) { home_x = x; home_y = y; }
+            }
+        }
+        if (!placed) continue;
+        a.id = next_animal_id_++;
+        a.lineage = a.id;
+        a.heading = static_cast<std::uint8_t>(rng.below(256));
+        a.health = 255;
+        a.stamina = std::uint16_t(frame(a.genome).stamina);
+        a.breath = breath_ticks;
+        a.energy = f.store * 3 / 4;
+        a.growth = 255;
+        animals_.push_back(a);
+        brains_.push_back(brains.pick(kind, std::size_t(arrived++)));
+    }
+    return arrived;
 }
 
 namespace {
@@ -256,6 +353,7 @@ void World::refresh_forage() {
 brain::Senses World::senses(std::size_t index) const {
     using namespace brain;
     Senses s{};
+    s.in[self_input(self_mouth_size)] = 127; // no contact, distinct from an equal-sized body
     const Animal& me = animals_[index];
     const Frame f = frame(me.genome, me.growth);
     const int w = config_.width, h = config_.height;
@@ -286,7 +384,8 @@ brain::Senses World::senses(std::size_t index) const {
         return food;
     };
     std::fill(who, who + sectors, -1);
-    const int range = f.sight;
+    // One lying still sees half as far.
+    const int range = (me.wants & wants_rest) ? std::max(1, f.sight / 2) : f.sight;
     for (const Seen& at : sight_table()) {
         if (at.distance > range) {
             break;
@@ -317,13 +416,43 @@ brain::Senses World::senses(std::size_t index) const {
             if (!them.health || std::size_t(j) == index) {
                 continue;
             }
-            if (close > near[sector]) {
+            if (them.medium == me.medium && std::abs(int(them.z) - me.z) <= cell_decimetres && close > near[sector]) {
                 near[sector] = close;
                 who[sector] = j;
             }
             if (ready && close > mate[sector] && them.growth == 255 && them.drive >= mating_drive &&
                 genetic_distance(me.genome, them.genome) <= breeding_distance) {
                 mate[sector] = close;
+            }
+        }
+    }
+    // Close to, it sees bodies where they are and not where their cells
+    // are: the table above starts a cell away and knows only cells, and a
+    // mouth reaches less than half of one. Anything within a cell of it is
+    // nearer than anything the table found.
+    {
+        int nearest[sectors];
+        std::fill(nearest, nearest + sectors, 256 * 256 + 1);
+        for (int y = std::max(0, cy - 1); y <= std::min(h - 1, cy + 1); ++y) {
+            for (int x = std::max(0, cx - 1); x <= std::min(w - 1, cx + 1); ++x) {
+                for (std::int32_t j = animal_head_[std::size_t(y) * w + x]; j >= 0; j = animal_next_[std::size_t(j)]) {
+                    const Animal& them = animals_[std::size_t(j)];
+                    if (!them.health || std::size_t(j) == index) continue;
+                    const int dx = them.x - me.x, dy = them.y - me.y, distance = dx * dx + dy * dy;
+                    if (distance > 256 * 256) continue;
+                    const int turn = distance ? std::int8_t(std::uint8_t(angle_of(dx, dy) - me.heading)) : 0;
+                    const int off = std::abs(turn);
+                    if (off > 96) continue;
+                    const int sector = off <= 13 ? ahead : off <= 45 ? (turn > 0 ? right : left) : (turn > 0 ? far_right : far_left);
+                    if (them.medium == me.medium && std::abs(int(them.z) - me.z) <= cell_decimetres && distance < nearest[sector]) {
+                        nearest[sector] = distance;
+                        near[sector] = range + 1;
+                        who[sector] = j;
+                    }
+                    if (ready && them.growth == 255 && them.drive >= mating_drive && genetic_distance(me.genome, them.genome) <= breeding_distance) {
+                        mate[sector] = range + 1;
+                    }
+                }
             }
         }
     }
@@ -336,7 +465,7 @@ brain::Senses World::senses(std::size_t index) const {
         if (who[sector] >= 0) {
             const Animal& them = animals_[std::size_t(who[sector])];
             s.in[sector_input(sector, in_size)] = input((body_length_mm(them.genome, them.growth) - f.length) / 8);
-            s.in[sector_input(sector, in_kin)] = input(std::max(0, 127 - genetic_distance(me.genome, them.genome) / 2));
+            s.in[sector_input(sector, in_kin)] = input(std::max(0, 127 - genetic_distance(me.genome, them.genome) / 8)); // fades out at about four times breeding reach: cousins still look like kin
         }
     }
     // Itself, and the cell its next steps reach, seen alone: sector sums blur it.
@@ -345,6 +474,7 @@ brain::Senses World::senses(std::size_t index) const {
     const int ahead_depth = depth_of(ax, ay);
     s.in[self_input(self_energy)] = input(std::int64_t(me.energy) * 127 / std::max(1, f.store));
     s.in[self_input(self_health)] = input(me.health / 2);
+    s.in[self_input(self_stamina)] = input(int(me.stamina) * 127 / std::max(1, f.stamina));
     s.in[self_input(self_breath)] = input(me.breath * 127 / breath_ticks);
     s.in[self_input(self_youth)] = input((255 - me.growth) * 127 / (255 - newborn_growth));
     s.in[self_input(self_drive)] = input(me.drive / 2);
@@ -359,7 +489,7 @@ brain::Senses World::senses(std::size_t index) const {
     const auto target = bite_target(me, f.length);
     if (target >= 0) {
         const Animal& other = animals_[target];
-        s.in[self_input(self_mouth_size)] = input((body_length_mm(other.genome, other.growth) - f.length) / 8);
+        s.in[self_input(self_mouth_size)] = std::min<std::int8_t>(126, input((body_length_mm(other.genome, other.growth) - f.length) / 8));
     }
     const int bearing = me.pain_bearing - me.heading;
     s.in[self_input(self_pain)] = input(me.pain);
@@ -470,7 +600,7 @@ void World::spread_scents() {
     }
 }
 
-void World::update_animals(PondTick* pond_tick) {
+void World::update_animals() {
     const int w = config_.width, h = config_.height;
     // How deep the water is where an animal is, in mm; -1 off the map.
     const auto depth_at = [&](int x, int y) {
@@ -506,15 +636,16 @@ void World::update_animals(PondTick* pond_tick) {
             a.turn = d.turn;
             a.pace = d.pace;
             a.wants = static_cast<std::uint8_t>((d.eat ? wants_eat : 0) | (d.mate ? wants_mate : 0) |
-                       (d.fly ? wants_fly : 0) | (d.call ? wants_call : 0) | (d.attack ? wants_attack : 0));
+                       (d.fly ? wants_fly : 0) | (d.call ? wants_call : 0) | (d.attack ? wants_attack : 0) |
+                       (d.rest ? wants_rest : 0));
             std::copy(d.memory, d.memory + brain::memories, a.memory);
         }
     }
     for (auto& a : animals_) {
-        if (a.health && (a.wants & wants_attack) && (tick_ + a.id) % 8 == 0) {
-            const int before = a.energy;
-            strike(a, frame(a.genome, a.growth));
-            if (pond_tick && a.id <= 2) pond_tick->founders[a.id - 1].strike_cost = before - a.energy;
+        if (a.health && (a.wants & wants_attack) && !(a.wants & wants_rest) && (tick_ + a.id) % 8 == lunge_windup) {
+            // A lunge takes wind, and one with none left cannot make it.
+            const Frame body = frame(a.genome, a.growth);
+            if (a.stamina >= body.stamina / lunges_in_a_wind) strike(a, body);
         }
     }
     for (std::size_t k = 0; k < animals_.size(); ++k) {
@@ -525,7 +656,11 @@ void World::update_animals(PondTick* pond_tick) {
         const int depth = depth_at(a.x, a.y);
         // Which medium it is in follows from where it is and whether it flies.
         auto medium = Medium(a.medium);
-        if (f.air_speed && (a.wants & wants_fly) && (medium == Medium::air || depth <= f.wade)) {
+        // Flying takes wind every tick. It needs a quarter of its wind to
+        // take off, and comes down when it has none.
+        if (f.air_speed && (a.wants & wants_fly) && a.stamina >= flight_wind &&
+            (medium == Medium::air || (depth <= f.wade && a.stamina >= f.stamina / 4))) {
+            a.stamina = std::uint16_t(a.stamina - flight_wind);
             medium = Medium::air;
             a.z = static_cast<std::int16_t>(std::min<int>(flying_height_dm, a.z + 1));
         } else if (medium == Medium::air && a.z > 0) {
@@ -545,7 +680,7 @@ void World::update_animals(PondTick* pond_tick) {
             --a.breath;
         } else if (a.health > 0) {
             if (--a.health == 0) {
-                leave_carcass(a, 0);
+                leave_carcass(a, 0, DeathCause::suffocated);
                 continue;
             }
         }
@@ -555,13 +690,14 @@ void World::update_animals(PondTick* pond_tick) {
         if ((a.wants & wants_call) && (tick_ + a.id) % call_ticks == 0 && calls_.size() < 1024) {
             calls_.push_back({a.x, a.y, a.id, std::uint32_t(tick_), a.genome.gene[agene_voice],
                               static_cast<std::uint8_t>(std::min(127, 48 + f.length / 32))});
-            const int call_cost = 1 + f.upkeep / 16;
-            a.energy -= call_cost;
-            if (pond_tick && a.id <= 2) pond_tick->founders[a.id - 1].call_cost = call_cost;
+            a.energy -= 1 + f.upkeep / 16;
+            if (observer_) observer_->spent(*this, a, 1 + f.upkeep / 16, EnergyUse::call);
+            if (observer_) observer_->called(*this, a);
         }
 
         // Eating: a mouthful of a plant in reach, if it has room for it.
         const bool eating = (a.wants & wants_eat) && medium != Medium::air && a.energy < f.store;
+        const int before_meal = a.energy;
         bool ate = eating && a.genome.gene[agene_meat_gut] >= 32 && eat_meat(a, f);
         if (!ate && eating && a.genome.gene[agene_plant_gut] >= 32) {
             // Anything can graze what grows low. Reach is for browsing what grows taller.
@@ -582,12 +718,11 @@ void World::update_animals(PondTick* pond_tick) {
                 if (p.height > 2 && (hash3(int(a.id), int(tick_), 9157) & 7) == 0) {
                     --p.height;
                 }
-                const int before_meal = a.energy;
                 a.energy = std::min(f.store, a.energy + taken * a.genome.gene[agene_plant_gut] / 64);
-                if (pond_tick && a.id <= 2) {
-                    auto& sample = pond_tick->founders[a.id - 1];
-                    sample.grazed_cell = int(cell); sample.plant_taken = taken;
-                    sample.plant_energy_gained = a.energy - before_meal;
+                if (observer_) {
+                    const int x = (a.x & ~255) + (p.slot == whole_cell ? 128 : 64 + 128 * (slot & 1));
+                    const int y = (a.y & ~255) + (p.slot == whole_cell ? 128 : 64 + 128 * (slot >> 1));
+                    observer_->ate_at(*this, a, a.energy - before_meal, false, x, y, p.height);
                 }
                 ate = true;
             }
@@ -597,11 +732,28 @@ void World::update_animals(PondTick* pond_tick) {
         // Moving: where its brain points it, as fast as its brain says and
         // its body allows. Only the edge of the world stops it.
         int pace = ate ? 0 : a.pace;
-        if (medium == Medium::air || (medium == Medium::water && !f.breathes_water && !f.fin)) {
+        const bool must_move = medium == Medium::air || (medium == Medium::water && !f.breathes_water && !f.fin);
+        const bool resting = (a.wants & wants_rest) && !must_move;
+        if (resting) pace = 0;
+        if (must_move) {
             pace = std::max(pace, 160); // it cannot stop there
         }
+        // Above a cruise it sprints, for as long as its wind lasts. On the
+        // ground and in the water walking takes wind too, and paddling
+        // without fins twice as much; in the air staying up already has.
+        int burst = std::max(0, pace - cruise_pace);
+        pace = std::min(pace, cruise_pace);
+        int walk = medium == Medium::air ? 0 : f.stamina * pace * (medium == Medium::water && !f.fin ? 2 : 1) / (cruise_pace * walk_ticks);
+        if (walk + burst > a.stamina) burst = 0;
+        if (walk > a.stamina) {
+            // Spent: it can only trudge. One that cannot stop where it is
+            // keeps on as it was, on nothing: a tired body still fights the water.
+            walk = 0;
+            if (!must_move) pace = std::min(pace, trudge_pace);
+        }
+        a.stamina = std::uint16_t(a.stamina - walk - burst);
         const int top = medium == Medium::land ? f.land_speed : medium == Medium::water ? f.water_speed : f.air_speed;
-        const int speed = top * pace / 255;
+        const int speed = top * (pace + burst * sprint_gain / (255 - cruise_pace)) / 255;
         a.heading = static_cast<std::uint8_t>(a.heading + a.turn);
         const int nx = a.x + icos(a.heading) * speed / 1024, ny = a.y + isin(a.heading) * speed / 1024;
         if (depth_at(nx, ny) >= 0) {
@@ -610,20 +762,36 @@ void World::update_animals(PondTick* pond_tick) {
             a.stride += std::uint32_t(speed);
         }
 
-        // Metabolism: upkeep, and what moving cost since the last pass.
+        // Metabolism: upkeep, and refilling the wind that moving has spent.
         if ((tick_ + a.id) % animal_stagger == 0) {
-            // Swimming on legs and flying are dear; walking and finning are not.
-            const int effort = medium == Medium::air ? 4 : medium == Medium::water && !f.fin ? 5 : 1;
             // Upkeep rises with age, so how long a body lasts is for selection to settle.
+            // One lying still burns a quarter less.
             const int upkeep = f.upkeep * (128 + std::min<int>(a.age, 384)) / 128;
-            const int movement_cost = f.upkeep * effort * pace / 255;
-            a.energy -= upkeep + movement_cost;
+            a.energy -= resting ? upkeep * 3 / 4 : upkeep;
+            if (observer_) observer_->spent(*this, a, resting ? upkeep * 3 / 4 : upkeep, EnergyUse::upkeep);
+            // Its wind comes back, out of its reserve, while it is on the
+            // ground or in the water and not sprinting: this is what moving
+            // costs it in food. Faster standing still, and faster and at
+            // half the price lying still.
+            if (a.stamina < f.stamina && medium != Medium::air && !burst && a.energy > 0) {
+                const int gain = std::min<int>(f.stamina - a.stamina, f.stamina / (resting ? 6 : pace < 32 ? 9 : 12));
+                a.stamina = std::uint16_t(a.stamina + gain);
+                a.energy -= std::max(1, f.upkeep * gain * (resting ? wind_cost / 2 : wind_cost) / f.stamina);
+                if (observer_) observer_->spent(*this, a, std::max(1, f.upkeep * gain * (resting ? wind_cost / 2 : wind_cost) / f.stamina), EnergyUse::stamina);
+            }
 
             // Growing up: a fed juvenile grows, at the pace its genes set.
             const auto pass = (tick_ + a.id) / animal_stagger;
             if (a.growth < 255 && a.energy > f.store / 2 && pass % (1 + a.genome.gene[agene_maturity] / 64u) == 0) {
                 ++a.growth;
                 a.energy -= std::max(1, f.mass75 / 16);
+                if (observer_) observer_->spent(*this, a, std::max(1, f.mass75 / 16), EnergyUse::growth);
+            }
+            // Wounds close slowly in a body that is fed and breathing, and closing them costs.
+            if (a.health < 255 && breathing && a.energy > f.store / 2) {
+                a.health = static_cast<std::uint8_t>(std::min(255, a.health + (resting ? 4 : 2)));
+                a.energy -= std::max(1, f.mass75 / 64);
+                if (observer_) observer_->spent(*this, a, std::max(1, f.mass75 / 64), EnergyUse::healing);
             }
             // The drive to mate rises while a grown animal is well fed, and
             // hunger holds it down: nothing breeds its way out of starving.
@@ -632,24 +800,9 @@ void World::update_animals(PondTick* pond_tick) {
             } else if (a.energy < f.store / 2) {
                 a.drive = static_cast<std::uint8_t>(std::max(0, a.drive - config_.hungry_drive_loss));
             }
-            if (pond_tick && a.id <= 2) {
-                auto& sample = pond_tick->founders[a.id - 1];
-                sample.movement_cost = movement_cost;
-                sample.upkeep_cost = upkeep;
-                sample.fed_check = a.growth == 255 && a.energy > f.store * 5 / 8;
-                sample.reached_ready = a.drive >= mating_drive;
-                if (animals_.size() >= 2 && animals_[0].id == 1 && animals_[1].id == 2) {
-                    const Animal& other = animals_[2 - a.id];
-                    const std::int64_t dx = a.x - other.x, dy = a.y - other.y;
-                    if (other.health && dx * dx + dy * dy < mating_reach * mating_reach)
-                        pond_tick->near_pair_drive = std::max(pond_tick->near_pair_drive, int(std::min(a.drive, other.drive)));
-                }
-            }
+            if (observer_) observer_->metabolised(*this, a, f);
             // Mating: both must be ready, both must choose to, and they must
             // be near enough alike, and together.
-#ifdef PETRIHD_SWIMMER_TRACE
-            swimmer_trace::mating_pass(*this, a);
-#endif
             if (a.growth == 255 && a.drive >= mating_drive && (a.wants & wants_mate) && medium != Medium::air) {
                 std::int64_t nearest = std::int64_t(mating_reach) * mating_reach;
                 std::int32_t mate = -1;
@@ -675,10 +828,11 @@ void World::update_animals(PondTick* pond_tick) {
                 }
                 if (mate >= 0) {
                     Animal& o = animals_[std::size_t(mate)];
+                    if (observer_) observer_->mated(*this, a, o);
                     // This one bears the young. Each takes every gene from
                     // one parent or the other, now and then changed a little,
                     // and a brain built from both of theirs.
-                    const int brood = 1 + (255 - a.genome.gene[agene_investment]) / 64;
+                    const int brood = brood_of(a.genome);
                     int born = 0;
                     for (int b = 0; b < brood && int(animals_.size()) < max_animals; ++b) {
                         Animal young{};
@@ -690,13 +844,15 @@ void World::update_animals(PondTick* pond_tick) {
                             }
                             young.genome.gene[gene] = static_cast<std::uint8_t>(std::clamp(value, 0, 255));
                         }
-                        const Frame small = frame(young.genome, newborn_growth);
+                        const int born_at = newborn_growth_of(young.genome);
+                        const Frame small = frame(young.genome, born_at);
                         // What it starts with comes out of its mother, who keeps enough to live on.
                         const int cost = small.store / 2 + small.mass75 / 4;
                         if (a.energy - cost < f.store / 3) {
                             break;
                         }
                         a.energy -= cost;
+                        if (observer_) observer_->spent(*this, a, small.mass75 / 4, EnergyUse::reproduction);
                         young.id = next_animal_id_++;
                         young.lineage = a.lineage;
                         young.stock = a.stock;
@@ -707,8 +863,9 @@ void World::update_animals(PondTick* pond_tick) {
                         young.heading = static_cast<std::uint8_t>(hash3(int(young.id), int(tick_), 7717));
                         young.medium = a.medium;
                         young.health = 255;
+                        young.stamina = std::uint16_t(frame(young.genome).stamina);
                         young.breath = breath_ticks;
-                        young.growth = newborn_growth;
+                        young.growth = std::uint8_t(born_at);
                         young.energy = small.store / 2;
                         std::uint32_t state = hash3(int(young.id), int(tick_), 0x51ed27u);
                         std::size_t first = k, second = std::size_t(mate);
@@ -731,16 +888,14 @@ void World::update_animals(PondTick* pond_tick) {
                         animals_.push_back(young);
                         brains_.push_back(mind);
                         ++born;
+                        if (observer_) observer_->born(*this, animals_.back(), a, o);
                     }
                     a.young = static_cast<std::uint16_t>(std::min(65535, a.young + born));
                     o.young = static_cast<std::uint16_t>(std::min(65535, o.young + born));
-                    if (pond_tick && born && a.id <= 2 && o.id <= 2) {
-                        pond_tick->birth_drives[a.id - 1] = a.drive;
-                        pond_tick->birth_drives[o.id - 1] = o.drive;
-                    }
                     a.drive = 0;
                     o.drive = 0;
                     o.energy -= frame(o.genome, o.growth).store / 16;
+                    if (observer_) observer_->spent(*this, o, frame(o.genome, o.growth).store / 16, EnergyUse::reproduction);
                 }
             }
             if (a.energy <= 0 && a.health > 0) {
@@ -752,7 +907,7 @@ void World::update_animals(PondTick* pond_tick) {
             }
         }
         if (a.health == 0) {
-            leave_carcass(a, 0);
+            leave_carcass(a, 0, DeathCause::starved);
         }
     }
     // The dead leave, and the rest close up, keeping their order.

@@ -8,10 +8,12 @@
 #include "batch.hpp"
 #include "camera.hpp"
 #include "creature.hpp"
+#include "creature_actions.hpp"
 #include "font.hpp"
 #include "pixel_target.hpp"
 #include "plant_sprites.hpp"
 #include "terrain_art.hpp"
+#include "terrain_batch.hpp"
 #include "water_surface.hpp"
 #include "world.hpp"
 
@@ -38,16 +40,17 @@ public:
 
     // Display height: cells of height per metre of elevation. True scale is
     // one cell per 1.5 m.
-    explicit TiltView(float cells_per_metre = 10.0f / float(phd::cell_decimetres), bool shoreline_study = false)
-        : relief_(cells_per_metre), shoreline_study_(shoreline_study) {}
+    TiltView(const CreatureActions& actions, float cells_per_metre, bool shoreline_study)
+        : actions_(actions), relief_(cells_per_metre), shoreline_study_(shoreline_study) {}
 
     // Whether the image being drawn into has an alpha channel: shadows use it
     // so that overlapping ones darken the ground once.
     void set_target_alpha(bool has) { target_alpha_ = has; }
     bool init(const phd::World& world);
     void refresh(const phd::World& world, int chunks); // re-height this many chunks
+    bool schedule_ground(const phd::World& world, const Camera& camera, int screen_w, int view_h, TerrainBatch* batch);
     // The display height of the ground at a point, in cells.
-    float ground(float x, float y) const;
+    float ground(float x, float y) const { return sample_ground(x, y, false); }
     // How high an animal's middle is drawn, for marking it on the screen.
     float animal_height(const phd::Animal& animal) const;
     void place_test_scene(const phd::World& world, float x, float y);
@@ -63,7 +66,7 @@ public:
     // Sprites painted into the atlas, and whether it has run out of room.
     int atlas_sprites() const { return int(painted_.size()); }
     bool atlas_full() const { return atlas_full_; }
-    // Milliseconds a frame spent painting ground, smoothed, and the most in one frame.
+    // Milliseconds of close-up ground uploads, smoothed, and the most in one frame.
     double ground_ms() const { return ground_ms_; }
     double ground_ms_max() const { return ground_ms_max_; }
 
@@ -122,6 +125,7 @@ private:
     };
 
     void build_heights(const phd::World& world);
+    float sample_ground(float x, float y, bool walking, bool* near_water = nullptr) const;
     void build_water(Chunk& chunk);
     bool water_quad(int x, int y, std::array<Vertex, 4>& quad) const;
     // The water's surface over a point, or `dry`; and how deep it stands there.
@@ -144,6 +148,7 @@ private:
     void build_scene(const phd::World& world, const Camera& camera, const Font& font, double time, int view_w,
                      int view_h);
 
+    const CreatureActions& actions_;
     float relief_;
     bool shoreline_study_;
     bool target_alpha_ = false;
@@ -157,17 +162,17 @@ private:
     struct GroundPatch {
         int x = 0, y = 0; // world patch coordinates of the uploaded pixels
         std::uint32_t signature = 0;
-        std::uint64_t checked_tick = 0, painted_frame = 0;
-        bool contains(int px, int py) const { return painted_frame && x == px && y == py; }
+        std::uint64_t checked_tick = 0;
+        bool valid = false;
+        bool contains(int px, int py) const { return valid && x == px && y == py; }
     };
-    bool update_ground(const phd::World& world, const Camera& camera, int screen_w, int view_h, bool capture);
-    void paint_ground(const phd::World& world, int patch_x, int patch_y);
+    void bind_ground(const Camera& camera);
+    void upload_ground(int patch_x, int patch_y, const std::vector<std::uint8_t>& pixels, const std::vector<std::uint8_t>& half);
     Texture ground_, ground_half_, ground_valid_;
     std::array<GroundPatch, window_patches * window_patches> ground_patches_{};
-    std::vector<std::uint8_t> tile_rgba_, tile_half_;
-    std::uint64_t ground_frame_ = 0;
-    int ground_cursor_ = 0, window_x_ = 0, window_y_ = 0;
-    double ground_ms_ = 0, ground_ms_max_ = 0;
+    bool ground_mask_dirty_ = true;
+    int window_x_ = 0, window_y_ = 0;
+    double ground_ms_ = 0, ground_ms_max_ = 0, ground_upload_ms_ = 0;
     gl::GLint u_ground_window_ = -1;
     int width_ = 0, height_ = 0;
     std::vector<float> corners_; // (width + 1) x (height + 1) display heights, as the world is now
@@ -228,7 +233,7 @@ private:
     art::Sun plant_sun_{};
     std::vector<Chunk*> plant_chunks_;
     gl::GLuint sprite_program_ = 0, scene_sprite_vbo_ = 0;
-    gl::GLint s_focus_ = -1, s_trig_ = -1, s_zoom_ = -1, s_screen_ = -1, s_depth_ = -1, s_tint_ = -1, s_wind_ = -1, s_texel_ = -1, s_view_ = -1;
+    gl::GLint s_focus_ = -1, s_trig_ = -1, s_zoom_ = -1, s_screen_ = -1, s_depth_ = -1, s_tint_ = -1, s_wind_ = -1, s_texel_ = -1, s_view_ = -1, s_xray_ = -1;
     float white_u_ = 0, white_v_ = 0;
     int sprites_drawn_ = 0;
 
@@ -247,6 +252,9 @@ private:
     std::vector<Animal> animals_;
     std::vector<creature::Foot> animal_feet_;
     std::vector<creature::Vertex> animal_vertices_;
+    // Tiny bodies rasterize straight into the art target at one texel per
+    // pixel. Shallow swimmers need their own batch above the water.
+    std::array<std::vector<creature::Vertex>, 2> distant_animals_;
     struct ShadowVertex {
         float x, y, depth, ink;  // screen position in creature texels, clip depth and ink level
         float ax, ay, cx, cy;    // framebuffer anchor, then the contact centre in local creature texels
@@ -291,12 +299,25 @@ private:
         float x, y, z, anchor_x, anchor_y, texel_x, texel_y, first, last, cells_per_alpha;
     };
     std::vector<PieceVertex> piece_vertices_;
-    PixelTarget layer_;
+    struct AnimalLayer {
+        PixelTarget target;
+        std::size_t first = 0, end = 0;
+    };
+    std::vector<AnimalLayer> animal_layers_;
+    int animal_layer_limit_ = 0;
+    PixelTarget portrait_;
+    std::uint32_t portrait_id_ = 0;
+    int portrait_growth_ = -1, portrait_medium_ = -1;
+    creature::Gesture portrait_gesture_{};
+    creature::PortraitFrame portrait_frame_{};
+    void upload_animal_mesh(const std::vector<creature::Vertex>& vertices);
+    void draw_animal_mesh(int first, int count, float ink);
     gl::GLuint piece_program_ = 0, piece_vbo_ = 0;
-    void draw_pieces(bool after_water, float depth_scale, float texel_size);
+    void draw_pieces(const AnimalLayer& layer, bool after_water, float depth_scale, float texel_size);
 public:
     // Before the frame's own target is bound: poses the animals and draws
     // them into their layer. `draw` then lays them into the scene.
+    const Texture* portrait(const phd::Animal& animal, int width, int height);
     void prepare_animals(const phd::World& world, const Camera& camera, int screen_w, int screen_h, int view_h, double time);
 private:
     // (Those swimming just under the surface are laid in after the water,

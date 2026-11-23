@@ -53,9 +53,9 @@ enum class Form : std::uint8_t {
 };
 
 // Bare branches look quite different from the side and from above, so a
-// leafless crown is painted for each of these camera pitches, in degrees,
+// directional crown is painted for each of these camera pitches, in degrees,
 // and the renderer shows the nearest. (A ball of leaves looks much the same
-// from anywhere, so leafy crowns have one picture.)
+// from anywhere, so round leafy crowns have one picture.)
 constexpr int views = 3;
 constexpr float view_pitch[views] = {55, 70, 90};
 inline int view_for(float pitch_degrees) { return pitch_degrees < 62.5f ? 0 : pitch_degrees < 80 ? 1 : 2; }
@@ -71,7 +71,7 @@ struct Spec {
     std::uint8_t flower = 0;  // petal colour, 0-5
     std::uint8_t variant = 0; // a different shape for the same numbers
     std::uint8_t form = 0;    // a crown's Form
-    std::uint8_t view = 0;    // bare crowns only: which of `view_pitch` it is painted for
+    std::uint8_t view = 0;    // which of `view_pitch` it is painted for
 
     std::uint64_t key() const;
 };
@@ -80,11 +80,11 @@ struct Image {
     int width = 0, height = 0;
     int anchor_x = 0; // the column that stands on the plant's spot
     int anchor_y = 0; // rows above the bottom row: 0 for what stands on the ground, a crown's middle
-    // Alpha is 0 for clear and 255 for solid. 200 marks a texel that glows
-    // with its own light: it is drawn as painted, whatever the time of day.
+    // Alpha tags clear pixels (0), opaque pigment (255), glowing pixels
+    // (200), and the tree foliage that X-ray can see through (240).
     std::vector<std::uint8_t> rgba;
 };
-constexpr std::uint8_t glow_alpha = 200;
+constexpr std::uint8_t glow_alpha = 200, foliage_alpha = 240;
 
 Image paint(const Spec& spec);
 

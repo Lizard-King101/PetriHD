@@ -8,6 +8,7 @@
 #include "fnv.hpp"
 #include "png.hpp"
 #include "random.hpp"
+#include "taxonomy.hpp"
 #include "world.hpp"
 
 namespace {
@@ -416,6 +417,61 @@ void test_neutral_inheritance() {
 }
 
 // The brain: its arithmetic, how it is inherited, and the founders' reflexes.
+void test_taxonomy() {
+    using namespace phd;
+    Taxonomy taxa;
+    // The five founders are five species, and the two with fins and gills share a family.
+    Taxonomy::Place place[founder_kinds];
+    for (int k = 0; k < founder_kinds; ++k) place[k] = taxa.classify(founder_genome(FounderKind(k)));
+    CHECK(taxa.species().size() == 5);
+    CHECK(taxa.family(place[int(FounderKind::fish)]) == taxa.family(place[int(FounderKind::swimmer)]));
+    CHECK(taxa.family(place[int(FounderKind::grazer)]) != taxa.family(place[int(FounderKind::crawler)]));
+    for (int a = 0; a < founder_kinds; ++a) {
+        for (int b = 0; b < a; ++b) CHECK(taxa.name(place[a]) != taxa.name(place[b]) && taxa.common(place[a]) != taxa.common(place[b]));
+    }
+    // Founders as a world places them are their kind's species, and no new subspecies.
+    Random rng(77);
+    for (int n = 0; n < 200; ++n) {
+        const auto kind = FounderKind(n % founder_kinds);
+        const auto found = taxa.classify(varied_founder(kind, rng));
+        CHECK(found.species == place[int(kind)].species && found.subspecies == 0);
+    }
+    CHECK(taxa.species().size() == 5);
+
+    // Drift: a little is the same animal, more is a subspecies, more a species of the same genus,
+    // and far enough another genus. A changed body plan is another family at once.
+    const AnimalGenome fish = founder_genome(FounderKind::fish);
+    const auto drifted = [&](int by) {
+        AnimalGenome g = fish;
+        // Spread over genes that do not set the plan.
+        const AnimalGene over[] = {agene_size, agene_build, agene_tail, agene_fat, agene_tone, agene_eyes, agene_nose, agene_ears};
+        for (int i = 0; by > 0; ++i) {
+            const int step = std::min(by, 40);
+            g.gene[over[i % 8]] = std::uint8_t(g.gene[over[i % 8]] + step);
+            by -= step;
+        }
+        return g;
+    };
+    const auto home = place[int(FounderKind::fish)];
+    CHECK(taxa.find(drifted(40)).species == home.species && taxa.find(drifted(40)).subspecies == 0);
+    const auto race = taxa.classify(drifted(200));
+    CHECK(race.species == home.species && race.subspecies == 1 && taxa.name(race) != taxa.name(home));
+    const auto cousin = taxa.classify(drifted(300));
+    CHECK(cousin.species != home.species && taxa.species()[std::size_t(cousin.species)].genus == taxa.species()[std::size_t(home.species)].genus);
+    CHECK(taxa.species()[std::size_t(cousin.species)].parent == home.species);
+    // A body plan changes a family when the lineage has become a species of its own:
+    // one fish with legs is still a fish.
+    AnimalGenome legged = fish;
+    legged.gene[agene_legs] = 140;
+    CHECK(taxa.find(legged).species == home.species);
+    legged.gene[agene_size] = 200;
+    const auto walker = taxa.classify(legged);
+    CHECK(walker.species != home.species && taxa.family(walker) != taxa.family(home));
+    // A taxonomy only watches: the same genomes in the same order give the same names.
+    Taxonomy again;
+    for (int k = 0; k < founder_kinds; ++k) CHECK(again.name(again.classify(founder_genome(FounderKind(k)))) == taxa.name(place[k]));
+}
+
 void test_brains() {
     using namespace phd;
     using namespace phd::brain;
@@ -510,6 +566,7 @@ int main() {
     test_save_round_trip();
     test_files();
     test_animals();
+    test_taxonomy();
     test_brains();
     test_neutral_inheritance();
     test_golden();

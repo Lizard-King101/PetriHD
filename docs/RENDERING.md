@@ -16,16 +16,17 @@ true slopes too.
 ## Two paths, one texture
 
 The first frame can show the whole world from its biome colours. The CPU
-then paints the 16-cell chunks on screen at 4 texels per cell, starting
-near the camera focus (`gfx/terrain_art.cpp`). Each chunk is also averaged
+then paints the visible 16-cell chunks in adjoining strips at 4 texels
+per cell (`gfx/terrain_art.cpp`). Each strip is also averaged
 down to 2 and 1 texel per cell. The zoomed-out view draws the level closest
 to one texel per pixel to keep small shapes such as tree crowns stable.
 
 Each chunk records the world tick and lighting mode it was painted for.
-The overview spends up to about 3 ms per frame on pending chunks, finishing
-the current chunk before it yields. Chunks that already have detail refresh
-oldest first as the simulation plays. A paused view finishes any outstanding
-work, then reuses its terrain and weather textures.
+A background worker paints from a read-only snapshot of the landscape. The
+renderer keeps showing the previous terrain until the visible map, its zoom
+levels, and any close-up ground patches are ready to upload in one frame.
+If the simulation advances during painting, the next batch takes the latest
+tick. Weather overlays and animals continue to draw while the worker paints.
 
 - **Ground and plants are separate layers.** The ground's colour comes from
   what it's made of (loam, sand, clay, peat, rock or gravel) and how wet it
@@ -36,7 +37,8 @@ work, then reuses its terrain and weather textures.
 
 | Zoom (px per cell) | Path | Pitch |
 | --- | --- | --- |
-| 1–32 | Flat (`gfx/world_view.cpp`): one textured quad, with clouds, fog, rain, snow and lightning over it | 90° |
+| 1–24 | Flat map with baked crowns and animal markers | 90° |
+| 24–32 | Smooth crossfade from the flat map to the live scene, half of each at 28 | 90° |
 | above 32 | Tilted (`gfx/tilt_view.cpp`): the same texture over a heightfield, depth-tested, with 3D objects | 72° at 64, 56° at 128, 45° at 256 |
 
 The camera (`gfx/camera.hpp`) is orthographic throughout. Pitch follows
@@ -50,9 +52,8 @@ in place. Tilting turns about the ground at the focus, not about sea level.
 - **Lighting:** the flat bake hill-shades from the sun. Tilted, the bake skips
   that and the shader lights the mesh from its own normals, with the same
   formula and slope scale (`art::shade_metres`), so the change at 32 px per
-  cell keeps the same shading. Chunks visible after a switch get the new
-  lighting within the usual painting budget.
-- **Trees change level of detail at 32 px per cell.** Flat, they are baked
+  cell keeps the same shading. Visible overview tiles receive the new lighting together.
+- **Trees fade between levels of detail from 24 to 32 px per cell.** Flat, they are baked
   crowns. Tilted, the bake leaves the crowns out and paints forest floor
   (leaf litter, needles) where they were, and the tilted view stands real
   trees in exactly those places, with the same sizes and colours
@@ -81,10 +82,9 @@ flowers and hill shading. Zooming in changes the detail, not the colours.
   2048 × 2048 texture covering 64 cells square. A 16 × 16 validity map tells
   the shader which 4 × 4-cell patches belong to the current window. Other
   patches show the overview texture until their detailed paint arrives.
-- **Painting budget.** The renderer fills one missing patch per frame, nearest
-  the focus first, including after a jump across the map. Once the view is
-  filled, it checks patches after a world tick and can repaint one changed
-  patch every other frame. The two texture resolutions update together.
+- **Ground updates.** The worker checks the visible patches against the
+  landscape snapshot and repaints those whose inputs changed. Both resolutions
+  become visible together with the overview tiles from the same tick.
 - **Below 45 px per cell** a half-size copy (16 texels per cell) is drawn,
   so there is still one texel to a pixel.
 
@@ -167,9 +167,9 @@ the three-quarter camera, at 32 texels per cell: one texel per art pixel at
   Moving away cancels an unfinished off-screen build.
 - **Wind:** the shader shifts each quad's top corners by whole texels, each
   plant on its own beat.
-- **Handover at 32 px per cell.** At 32 and below the camera is top-down and
-  the bird's-eye map is drawn; plant sprites and the painted ground show
-  only above 32, as the camera starts to tilt.
+- **Overhead transition.** At 24 px per cell the baked map fills the view.
+  At 32 the painted ground, plant sprites and creature meshes fill it. Both
+  render into the same pixel grid during the fade. The camera starts tilting above 32.
 - **In the bird's-eye map a bare tree is its limbs:** five grey spokes with
   the ground between, and no snow lying on them.
 
@@ -224,8 +224,8 @@ the lakebed. The overhead map uses the same shoreline at four texels per cell.
   area. The shallows show the bed and its shadows, with a broken pale line
   at the edge. Deep water is opaque and frozen water shows ice.
 - **Water blends over the bed and its shadows.** It reads the scene depth
-  so plants and animals above the surface stay visible. Wading animals and
-  swimmers near the surface are drawn afterward.
+  so plants and limbs above the surface stay visible. The water blends over
+  submerged legs and their outlines. Swimmers near the surface are drawn afterward.
 - **Plants in water** stand at its surface and show what is clear of it:
   grass, reeds and bushes are painted that much shorter, and a tree's trunk
   starts at the waterline.
@@ -306,6 +306,13 @@ place, so it moves smoothly at any frame rate. See [ANIMALS.md](ANIMALS.md).
   sprawl, fins, wings, pigments and a pattern) and how it is moving
   (`creature::Pose`). The spine is a tube of eight-sided rings from the tail
   to the snout, which wags as it goes, a swimmer's with its whole length.
+  Limb roots widen the shoulders and hips. Fin-bearing, legless animals
+  keep a continuous taper through the trunk.
+- **Armor and frills.** Growth-adjusted mouth, front and back hardness
+  raise and shade the existing skin vertices in each region. Brow plates
+  leave the eye sockets exposed. Animals with a voice gene of 128 or higher
+  grow a frill behind the eyes. These details appear in portraits and on
+  full-detail animals whose trunk is at least five creature texels wide.
 - **Legs follow the medium.** On land, neighbouring legs take turns. A
   planted foot stays on the ground while the body passes over, then lifts
   and swings ahead. In water, each foot sweeps back wide and recovers close
@@ -314,6 +321,8 @@ place, so it moves smoothly at any frame rate. See [ANIMALS.md](ANIMALS.md).
 - **Fins and wings** are flat pieces lit the same from both sides. The
   shoulder drives the wingbeat. The wrist folds the outer span down on
   the upstroke and extends it with a slight upward bend on the downstroke.
+  On landing, both wings fold over the upper flanks and follow the back
+  toward the tail.
 - **Stepped light.** Light from the upper left gives the coat four broad
   tones, from cool shade to warm highlights. Narrow transitions between
   tones keep a turning flank steady. Stripes and spots follow the skin.
@@ -341,10 +350,18 @@ place, so it moves smoothly at any frame rate. See [ANIMALS.md](ANIMALS.md).
   eye sits on a socket on the head and covers at least one whole layer pixel.
   The head and other body parts can hide it as the animal turns. Shins
   also have a minimum width on this grid.
+- **Small creatures in the overview.** When one creature texel occupies one
+  render-target pixel, bodies up to 16 target pixels across use a simpler
+  mesh on the same animated joints. Their bodies and outlines draw together
+  in batches, and their cast shadows use the simpler silhouette. Surface
+  swimmers have a separate batch for the water tint. Larger creatures and
+  inspector portraits use the detailed mesh.
 - **In water.** The water hides whatever its bed is too deep to show, so an
   animal swimming within half a cell of the surface is laid in after the
-  water, tinted by it and without ink. One that wades is laid over the
-  water whole: its legs are not tinted.
+  water, tinted by it and without ink. Walkers plant their feet on the bed.
+  In the shoreline study each limb texel takes the water colour where the
+  surface crosses it. In the single-mesh view the opaque painted surface hides
+  the submerged part.
 - **Pixel shadows.** Every animal casts its posed mesh along the sun's
   direction onto the terrain. Heads, tails and moving limbs all contribute
   to one silhouette on the creature pixel grid. On land each sole adds
@@ -382,7 +399,9 @@ concept art. The interface stays at full resolution on top.
 | O | Move the test tree and creature to the focus |
 | `--zoom Z --at X,Y` | Start at a zoom and focus cell |
 | `--relief K` | Display cells of height per metre |
-| `--pixel N` | Screen pixels per world-target pixel (default 2). Use 1 for screen-pixel positioning at full resolution. |
+| `--performance desktop` | Default. Two screen pixels per art pixel, with display-synchronized presentation. |
+| `--performance low` | Fit the world target within 400×240 using whole-pixel scaling. Aim for 30 FPS during interactive use. Frame benchmarks bypass the frame limiter. |
+| `--pixel N` | Override the profile's scale with 1–8 screen pixels per art pixel, subject to the GPU's maximum target size. |
 
 ## Results on the PC
 
@@ -391,8 +410,10 @@ before buffer swap. `frame_ms_first` includes cold-cache work inside that
 frame. `detail_ready_frame` is the first frame with all visible ground
 and foliage detail present, and `detail_ready_ms` is elapsed time to that
 frame at the uncapped benchmark speed. Both read zero if the run ends
-earlier. `bake_chunks_last` counts overview chunks rebaked on the final
-frame. Screenshots finish visible work for the requested tick before readback.
+earlier. `bake_chunks_last` counts overview chunks uploaded on the final
+frame. `bake_ms` measures render-thread scheduling and publication, and
+`ground_ms` measures close-up ground uploads. Screenshots finish visible
+work for the requested tick before readback.
 
 Seed 1, tick 1,620 (day 7, summer, evening). Each row of the contact sheet is
 one place at 32, 64, 128 and 256 px per cell: a mountainside, a lake shore,

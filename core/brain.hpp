@@ -16,7 +16,7 @@ enum Sector : std::uint8_t { far_left, left, ahead, right, far_right, sectors };
 // What it sees in one sector. Each value is scaled to an int8.
 enum SectorInput : std::uint8_t {
     in_food,   // grazing, nearer counting for more
-    in_animal, // how near the nearest animal is, 0 for none
+    in_animal, // nearest animal in the same medium and reachable height, 0 for none
     in_size,   // that animal's length less its own
     in_kin,    // how like its own that animal's genome is
     in_hazard, // ground its body cannot go on, and the world's edge; nearer counting for more
@@ -57,10 +57,11 @@ enum SelfInput : std::uint8_t {
     heard_kin,   // how like its own voice the call's pitch is
     heard_ahead, // where the call is, if it is in a voice like its own
     heard_right,
-    self_mouth_size, // length of the animal within striking reach minus its own
+    self_mouth_size, // relative length within striking reach; 127 means no contact (equal size is 0)
     self_pain,       // strength of the most recent hit, fading with time
     pain_ahead,      // bearing of the hit relative to its current heading
     pain_right,
+    self_stamina,    // how much it has left for a burst: a sprint, a lunge, staying in the air
     self_inputs
 };
 
@@ -79,6 +80,7 @@ enum Output : std::uint8_t {
     out_memory1,
     out_memory2,
     out_attack,
+    out_rest, // lie still: it burns less and mends and recovers faster, and sees less
     outputs
 };
 
@@ -103,7 +105,7 @@ constexpr int self_input(int which) { return sectors * sector_inputs + which; }
 struct Decision {
     std::int8_t turn = 0;   // binary angles a tick
     std::uint8_t pace = 0;
-    bool eat = false, mate = false, fly = false, call = false, attack = false;
+    bool eat = false, mate = false, fly = false, call = false, attack = false, rest = false;
     std::int8_t memory[memories] = {};
     std::int8_t unit[hidden] = {};  // what each hidden unit said, for looking at
     std::int8_t out[outputs] = {};  // and each output
@@ -126,6 +128,11 @@ void shuffle(Brain& brain, std::uint32_t& state);
 
 // The founders' brain: a handful of reflexes wired by hand, and the rest of
 // the network left blank for evolution to use.
-Brain founder(bool hunts = false);
+// One that `hunts` strikes a smaller body at its mouth when hungry; one
+// that also `spares_kin` holds the strike while its own kind is in front.
+// One that `pursues` is a hunter by trade: it turns hard toward smaller
+// bodies it sees, and strikes whatever is at its mouth and no bigger than
+// itself as soon as it is less than full, grown prey as readily as young.
+Brain founder(bool hunts = false, bool spares_kin = false, bool pursues = false);
 
 } // namespace phd::brain

@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
     bool biomes = false;
     int animals = 0;
     std::optional<phd::BrainMode> brains;
-    std::string load, save, png;
+    std::string load, save, png, founders;
     for (int i = 1; i < argc; ++i) {
         const char* eq = std::strchr(argv[i], '=');
         if (!eq) {
@@ -169,6 +169,8 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "unknown brain mode '%s' (expected evolving, frozen, shuffled or neutral)\n", value.c_str());
                 return 2;
             }
+        } else if (key == "founders") {
+            founders = value;
         } else if (key == "load") {
             load = value;
         } else if (key == "save") {
@@ -190,7 +192,13 @@ int main(int argc, char** argv) {
         }
     }
     if (animals > 0 && world.animals().empty()) {
-        world.seed_animals(animals);
+        auto brains_for_founders = phd::FounderBrains::hand_wired();
+        std::vector<std::uint8_t> file;
+        if (!founders.empty() && (!phd::read_file(founders, file) || !phd::FounderBrains::decode(file.data(), file.size(), brains_for_founders))) {
+            std::fprintf(stderr, "could not read founder brains from %s\n", founders.c_str());
+            return 1;
+        }
+        world.seed_animals(animals, brains_for_founders);
     }
     if (brains) world.set_brain_mode(*brains);
     const bool report_animals = animals > 0 || brains.has_value() || world.has_had_animals() ||

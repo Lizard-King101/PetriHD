@@ -42,9 +42,20 @@ struct Body {
     float eye = 0.022f;
     Color primary{170, 130, 84, 255}, secondary{226, 208, 170, 255};
     Pattern pattern = Pattern::pale_belly;
+    float mouth_hardness = 0, front_hardness = 0, back_hardness = 0; // effective at this growth, 0..1
+    bool frill = false;
 };
 
 enum class Medium : std::uint8_t { land, water, air };
+
+enum class Action { idle, call, feed, mate, strike, recoil };
+struct Gesture {
+    Action action = Action::idle;
+    float amount = 0; // signed for a strike's draw-back and forward thrust
+    float side = 0;   // side of the body toward the food, prey or away from the blow
+    float forward = 1; // target direction along the spine
+    float food_height = 0; // cells above ground on land, relative to the swimmer in water
+};
 
 struct Pose {
     float x = 0, y = 0;  // where it is, in cells
@@ -54,6 +65,7 @@ struct Pose {
     float pace = 1;      // 0 standing still to 1 at full stride
     Medium medium = Medium::land;
     float grain = 0;     // cells to a pixel of the picture it is drawn into: an eye is never smaller than one
+    Gesture gesture;
 };
 
 // The display height of the ground at a point, for feet to find.
@@ -64,14 +76,25 @@ struct Foot {
     float x, y, z;
 };
 
+enum class Detail { full, distant };
+
 // Appends the body's triangles and, when requested, the world positions
 // of the soles in a land pose, including any feet swinging forward.
-void build(std::vector<Vertex>& out, const Body& body, const Pose& pose, const Ground& ground, std::vector<Foot>* feet = nullptr);
+void build(std::vector<Vertex>& out, const Body& body, const Pose& pose, const Ground& ground,
+           std::vector<Foot>* feet = nullptr, Detail detail = Detail::full);
 
 // How thick its legs are at the shin, as drawn at this grain.
 inline float shin(const Body& body, float grain) { return body.leg_girth > grain * 0.55f ? body.leg_girth : grain * 0.55f; }
 
 // How high its middle rides above the ground when it stands.
 float ride_height(const Body& body);
+
+struct PortraitFrame {
+    static constexpr float sin_pitch = 0.5f, cos_pitch = 0.8660254f;
+    float cx, cy, zoom, depth_scale;
+};
+
+Pose portrait_pose(const Body& body, Medium medium);
+PortraitFrame frame_portrait(const Body& adult, int width, int height);
 
 } // namespace gfx::creature

@@ -38,6 +38,18 @@ void follow(gfx::Camera& c) {
 
 int main() {
     const float w = 800, h = 448;
+    // Both maps share an overhead projection throughout the crossfade.
+    gfx::Camera transition;
+    const float stops[][2] = {{16, 0}, {24, 0}, {26, 0.15625f}, {28, 0.5f}, {30, 0.84375f}, {32, 1}};
+    for (const auto& [zoom, opacity] : stops) {
+        transition.zoom = zoom;
+        CHECK_NEAR(transition.pitch(), 90, 0);
+        CHECK_NEAR(transition.live_opacity(), opacity, 1e-6);
+    }
+    transition.zoom = 64;
+    transition.top_down = true;
+    CHECK_NEAR(transition.live_opacity(), 1, 0);
+    CHECK_NEAR(transition.pitch(), 90, 0);
     // Panning by one world-target pixel carries both the sprite and the
     // shadow grid exactly that far, including fractional zoom and half ties.
     for (const float zoom : {40.0f, 147.0f, 160.0f, 256.0f}) {

@@ -1,7 +1,5 @@
 #include "world_view.hpp"
 
-#include <SDL.h>
-
 #include <algorithm>
 #include <cmath>
 
@@ -11,8 +9,6 @@ namespace gfx {
 namespace {
 
 constexpr int tpc = art::texels_per_cell;
-
-double seconds() { return double(SDL_GetPerformanceCounter()) / double(SDL_GetPerformanceFrequency()); }
 
 // A cheap, complete map at every zoom while the first detailed chunks arrive.
 Texture preview_texture(const phd::World& world, int scale) {
@@ -39,14 +35,10 @@ Texture preview_texture(const phd::World& world, int scale) {
 bool WorldView::init(const phd::World& world) {
     chunks_x_ = (world.width() + chunk_cells - 1) / chunk_cells;
     chunks_y_ = (world.height() + chunk_cells - 1) / chunk_cells;
-    chunk_rgb_.resize(std::size_t(chunk_cells * tpc) * chunk_cells * tpc * 3);
-    half_rgb_.resize(chunk_rgb_.size() / 4);
-    quarter_rgb_.resize(chunk_rgb_.size() / 16);
     terrain_ = preview_texture(world, tpc);
     terrain_half_ = preview_texture(world, tpc / 2);
     terrain_quarter_ = preview_texture(world, 1);
     baked_.assign(std::size_t(chunks_x_) * chunks_y_, BakedChunk{});
-    pending_.reserve(baked_.size());
     cloud_rgba_.assign(std::size_t(world.nodes_x()) * world.nodes_y() * 4, 255);
     fog_rgba_ = cloud_rgba_;
     light_rgba_.assign(std::size_t(light_size) * light_size * 4, 255);
@@ -57,34 +49,25 @@ bool WorldView::init(const phd::World& world) {
     return terrain_.id && terrain_half_.id && terrain_quarter_.id && clouds_.id && fog_.id;
 }
 
-void WorldView::bake_chunk(const phd::World& world, const art::Sun& sun, int chunk, bool flat) {
-    const int cx = chunk % chunks_x_, cy = chunk / chunks_x_;
-    const int tx = cx * chunk_cells * tpc, ty = cy * chunk_cells * tpc;
-    const int w = std::min(chunk_cells, world.width() - cx * chunk_cells) * tpc;
-    const int h = std::min(chunk_cells, world.height() - cy * chunk_cells) * tpc;
-    art::bake(world, sun, tx, ty, w, h, chunk_rgb_.data(), w * 3, flat);
-    update_texture_region(terrain_, tx, ty, w, h, gl::RGB, chunk_rgb_.data());
-    // Box-filter down by two, twice.
-    const auto halve = [](const std::uint8_t* from, int fw, int fh, std::uint8_t* to) {
-        for (int y = 0; y < fh / 2; ++y) {
-            for (int x = 0; x < fw / 2; ++x) {
-                for (int c = 0; c < 3; ++c) {
-                    const auto at = [&](int dx, int dy) { return int(from[(std::size_t(2 * y + dy) * fw + 2 * x + dx) * 3 + c]); };
-                    to[(std::size_t(y) * (fw / 2) + x) * 3 + c] = std::uint8_t((at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1) + 2) / 4);
-                }
-            }
+
+bool WorldView::refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, float live_opacity, TerrainBatch* batch) {
+    bool ready = true;
+    if (live_opacity < 1) ready = refresh_terrain(world, camera, view_w, view_h, false, batch);
+    if (live_opacity > 0) {
+        if (!live_terrain_.id) {
+            live_terrain_ = preview_texture(world, tpc);
+            live_baked_.resize(baked_.size());
         }
-    };
-    halve(chunk_rgb_.data(), w, h, half_rgb_.data());
-    update_texture_region(terrain_half_, tx / 2, ty / 2, w / 2, h / 2, gl::RGB, half_rgb_.data());
-    halve(half_rgb_.data(), w / 2, h / 2, quarter_rgb_.data());
-    update_texture_region(terrain_quarter_, tx / 4, ty / 4, w / 4, h / 4, gl::RGB, quarter_rgb_.data());
+        ready = refresh_terrain(world, camera, view_w, view_h, true, batch) && ready;
+    }
+    if (sky_tick_ != world.tick()) update_sky(world);
+    return ready;
 }
 
-bool WorldView::refresh(const phd::World& world, const Camera& camera, int view_w, int view_h, double budget,
-                        bool tilted, bool capture) {
-    const double start = seconds();
-    const Lighting lighting = tilted ? Lighting::tilted : Lighting::flat;
+bool WorldView::refresh_terrain(const phd::World& world, const Camera& camera, int view_w, int view_h,
+                                bool tilted, TerrainBatch* batch) {
+    auto& cache = tilted ? live_baked_ : baked_;
+    const Lighting lighting = tilted ? Lighting::tilted : camera.tree_xray ? Lighting::xray : Lighting::flat;
     // The cells in view: flat, a rectangle; tilted, the view reaches further
     // north, and terrain rising from beyond its bottom edge can show too.
     const float half_w = float(view_w) / (2 * camera.zoom);
@@ -94,44 +77,47 @@ bool WorldView::refresh(const phd::World& world, const Camera& camera, int view_
     const int y0 = std::max(0, int(std::max(0.0f, camera.cy - reach - extra)) / chunk_cells);
     const int x1 = std::min(chunks_x_ - 1, int(std::max(0.0f, camera.cx + half_w)) / chunk_cells);
     const int y1 = std::min(chunks_y_ - 1, int(std::max(0.0f, camera.cy + reach + extra / 4)) / chunk_cells);
-    pending_.clear();
-    int missing = 0;
+    bool ready = true;
+    // Bake adjacent chunks in strips to share edge samples and reduce texture uploads.
     for (int y = y0; y <= y1; ++y) {
-        for (int x = x0; x <= x1; ++x) {
-            const int chunk = y * chunks_x_ + x;
-            const auto& baked = baked_[std::size_t(chunk)];
-            const bool needs_detail = baked.lighting != lighting;
-            if (needs_detail || baked.tick != world.tick()) {
-                const float dx = (x + 0.5f) * chunk_cells - camera.cx;
-                const float dy = (y + 0.5f) * chunk_cells - camera.cy;
-                pending_.push_back({chunk, needs_detail, baked.tick, dx * dx + dy * dy});
-                missing += needs_detail;
+        for (int x = x0; x <= x1;) {
+            const auto stale = [&](int column) {
+                const auto& tile = cache[std::size_t(y * chunks_x_ + column)];
+                return tile.lighting != lighting || tile.tick != world.tick();
+            };
+            if (!stale(x)) { ++x; continue; }
+            const int first = x++;
+            while (x <= x1 && stale(x)) ++x;
+            const int end = x;
+            for (int col = first; col < end; ++col) {
+                if (cache[std::size_t(y * chunks_x_ + col)].lighting != lighting) ready = false;
             }
+            if (!batch) continue;
+            const int tx = first * chunk_cells * tpc, ty = y * chunk_cells * tpc;
+            const int w = std::min(end * chunk_cells, world.width()) * tpc - tx;
+            const int h = std::min(chunk_cells, world.height() - y * chunk_cells) * tpc;
+            batch->add([=](const phd::World& source) {
+                std::vector<std::uint8_t> pixels(std::size_t(w) * h * 3);
+                art::bake(source, art::sun_for(source), tx, ty, w, h, pixels.data(), w * 3, !tilted, lighting == Lighting::xray);
+                std::vector<std::uint8_t> half, quarter;
+                if (!tilted) {
+                    half = half_terrain<3>(pixels, w, h);
+                    quarter = half_terrain<3>(half, w / 2, h / 2);
+                }
+                return [=, pixels = std::move(pixels), half = std::move(half), quarter = std::move(quarter), tick = source.tick()] {
+                    update_texture_region(tilted ? live_terrain_ : terrain_, tx, ty, w, h, gl::RGB, pixels.data());
+                    if (!tilted) {
+                        update_texture_region(terrain_half_, tx / 2, ty / 2, w / 2, h / 2, gl::RGB, half.data());
+                        update_texture_region(terrain_quarter_, tx / 4, ty / 4, w / 4, h / 4, gl::RGB, quarter.data());
+                    }
+                    auto& published = tilted ? live_baked_ : baked_;
+                    for (int col = first; col < end; ++col) published[std::size_t(y * chunks_x_ + col)] = {tick, lighting};
+                    uploaded_chunks_ += end - first;
+                };
+            });
         }
     }
-    const auto sun = art::sun_for(world);
-    chunks_last_ = 0;
-    // Fill holes near the focus first. Then service the oldest visible tick
-    // first so distant chunks still catch up while the simulation is playing.
-    std::sort(pending_.begin(), pending_.end(), [](const BakeJob& a, const BakeJob& b) {
-        if (a.needs_detail != b.needs_detail) return a.needs_detail;
-        if (!a.needs_detail && a.tick != b.tick) return a.tick < b.tick;
-        return a.distance < b.distance;
-    });
-    for (const BakeJob& job : pending_) {
-        bake_chunk(world, sun, job.chunk, !tilted);
-        baked_[std::size_t(job.chunk)] = {world.tick(), lighting};
-        ++chunks_last_;
-        if (!capture && seconds() - start >= budget) {
-            break;
-        }
-    }
-    if (sky_tick_ != world.tick()) {
-        update_sky(world);
-    }
-    const double ms = (seconds() - start) * 1000.0;
-    bake_ms_ = bake_ms_ * 0.9 + ms * 0.1;
-    return chunks_last_ >= missing;
+    return ready;
 }
 
 void WorldView::update_sky(const phd::World& world) {

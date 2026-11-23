@@ -1,0 +1,288 @@
+{
+  "design": {
+    "wild": "Body seed 1, maps 7101-7104, 20 years; 60 carnivores introduced at year 8 where settlement succeeds.",
+    "interventions": "Applied from founding; prey_no_flight changes the whole prey ecology. Diet-selective changes are diagnostic counterfactuals.",
+    "cost": "Recorded upkeep, wind recovery, calls, growth and healing; excludes reproductive transfers and changes in reserves and carcass biomass.",
+    "arena_cost_cohort": "Costs follow animals classified carnivorous; food follows the initial hunter family and its descendants.",
+    "scope": "One body seed and existing brains, without retraining; these results do not establish generalization to other body sets."
+  },
+  "arena": {
+    "land": {
+      "trials": 48,
+      "meat": 8235370,
+      "plants": 19456635,
+      "recorded_cost": 19994235,
+      "plant_share_of_intake": 0.702608,
+      "meat_to_recorded_cost": 0.411887,
+      "mean_living": 31.645833333333332
+    },
+    "water": {
+      "trials": 48,
+      "meat": 2817033,
+      "plants": 1592349,
+      "recorded_cost": 4658862,
+      "plant_share_of_intake": 0.361127,
+      "meat_to_recorded_cost": 0.604661,
+      "mean_living": 7.333333333333333
+    }
+  },
+  "wild": {
+    "baseline": {
+      "maps": 4,
+      "living_y12": [
+        59,
+        49,
+        23,
+        25
+      ],
+      "living_y16": [
+        25,
+        21,
+        4,
+        26
+      ],
+      "living_y20": [
+        7,
+        8,
+        0,
+        13
+      ],
+      "births": 383,
+      "starved": 326,
+      "suffocated": 162,
+      "killed": 107,
+      "meat_to_recorded_cost": 0.607853,
+      "total_food_to_recorded_cost": 0.952967,
+      "wind_to_basal": 0.353868,
+      "hit_share_of_lunges": 0.128608,
+      "fed_share_of_passes": 0.45163,
+      "sprint_requested_share_of_ticks": 0.134819,
+      "low_stamina_share_of_ticks": 0.047152
+    },
+    "hunter_no_sprint": {
+      "maps": 4,
+      "living_y12": [
+        35,
+        36,
+        20,
+        21
+      ],
+      "living_y16": [
+        18,
+        7,
+        5,
+        11
+      ],
+      "living_y20": [
+        7,
+        2,
+        2,
+        5
+      ],
+      "births": 294,
+      "starved": 243,
+      "suffocated": 172,
+      "killed": 103,
+      "meat_to_recorded_cost": 0.605442,
+      "total_food_to_recorded_cost": 0.94089,
+      "wind_to_basal": 0.31368,
+      "hit_share_of_lunges": 0.133743,
+      "fed_share_of_passes": 0.481895,
+      "sprint_requested_share_of_ticks": 0.154814,
+      "low_stamina_share_of_ticks": 0.000165
+    },
+    "prey_no_flight": {
+      "maps": 4,
+      "living_y12": [
+        41,
+        51,
+        20,
+        20
+      ],
+      "living_y16": [
+        24,
+        22,
+        5,
+        5
+      ],
+      "living_y20": [
+        13,
+        6,
+        1,
+        5
+      ],
+      "births": 350,
+      "starved": 307,
+      "suffocated": 138,
+      "killed": 120,
+      "meat_to_recorded_cost": 0.58478,
+      "total_food_to_recorded_cost": 0.94476,
+      "wind_to_basal": 0.356333,
+      "hit_share_of_lunges": 0.129744,
+      "fed_share_of_passes": 0.446516,
+      "sprint_requested_share_of_ticks": 0.141966,
+      "low_stamina_share_of_ticks": 0.051351
+    },
+    "hunter_half_wind_cost": {
+      "maps": 4,
+      "living_y12": [
+        67,
+        95,
+        35,
+        42
+      ],
+      "living_y16": [
+        40,
+        49,
+        18,
+        31
+      ],
+      "living_y20": [
+        1,
+        32,
+        3,
+        25
+      ],
+      "births": 553,
+      "starved": 326,
+      "suffocated": 213,
+      "killed": 193,
+      "meat_to_recorded_cost": 0.55824,
+      "total_food_to_recorded_cost": 0.98029,
+      "wind_to_basal": 0.175018,
+      "hit_share_of_lunges": 0.12411,
+      "fed_share_of_passes": 0.468657,
+      "sprint_requested_share_of_ticks": 0.162007,
+      "low_stamina_share_of_ticks": 0.062742
+    },
+    "hunter_same_medium_sight": {
+      "maps": 4,
+      "living_y12": [
+        56,
+        43,
+        15,
+        24
+      ],
+      "living_y16": [
+        27,
+        32,
+        5,
+        18
+      ],
+      "living_y20": [
+        14,
+        18,
+        3,
+        12
+      ],
+      "births": 372,
+      "starved": 311,
+      "suffocated": 138,
+      "killed": 116,
+      "meat_to_recorded_cost": 0.635378,
+      "total_food_to_recorded_cost": 0.959691,
+      "wind_to_basal": 0.336691,
+      "hit_share_of_lunges": 0.140169,
+      "fed_share_of_passes": 0.483646,
+      "sprint_requested_share_of_ticks": 0.128794,
+      "low_stamina_share_of_ticks": 0.039531
+    },
+    "no_sprint_and_same_medium": {
+      "maps": 4,
+      "living_y12": [
+        34,
+        50,
+        21,
+        36
+      ],
+      "living_y16": [
+        20,
+        33,
+        6,
+        15
+      ],
+      "living_y20": [
+        7,
+        8,
+        4,
+        12
+      ],
+      "births": 368,
+      "starved": 311,
+      "suffocated": 174,
+      "killed": 92,
+      "meat_to_recorded_cost": 0.627645,
+      "total_food_to_recorded_cost": 0.957054,
+      "wind_to_basal": 0.297818,
+      "hit_share_of_lunges": 0.142762,
+      "fed_share_of_passes": 0.470545,
+      "sprint_requested_share_of_ticks": 0.150705,
+      "low_stamina_share_of_ticks": 0.000143
+    },
+    "hunter_no_empty_strikes": {
+      "maps": 4,
+      "living_y12": [
+        45,
+        71,
+        19,
+        33
+      ],
+      "living_y16": [
+        31,
+        58,
+        12,
+        16
+      ],
+      "living_y20": [
+        9,
+        14,
+        7,
+        11
+      ],
+      "births": 402,
+      "starved": 315,
+      "suffocated": 158,
+      "killed": 128,
+      "meat_to_recorded_cost": 0.6105,
+      "total_food_to_recorded_cost": 0.961057,
+      "wind_to_basal": 0.30004,
+      "hit_share_of_lunges": 1.0,
+      "fed_share_of_passes": 0.471249,
+      "sprint_requested_share_of_ticks": 0.140933,
+      "low_stamina_share_of_ticks": 0.047664
+    },
+    "hand_wired": {
+      "maps": 4,
+      "living_y12": [
+        29,
+        31,
+        24,
+        22
+      ],
+      "living_y16": [
+        13,
+        10,
+        4,
+        7
+      ],
+      "living_y20": [
+        2,
+        7,
+        0,
+        2
+      ],
+      "births": 236,
+      "starved": 355,
+      "suffocated": 26,
+      "killed": 84,
+      "meat_to_recorded_cost": 0.394808,
+      "total_food_to_recorded_cost": 0.904967,
+      "wind_to_basal": 0.302165,
+      "hit_share_of_lunges": 0.109804,
+      "fed_share_of_passes": 0.383842,
+      "sprint_requested_share_of_ticks": 0.000759,
+      "low_stamina_share_of_ticks": 0.000111
+    }
+  },
+  "control_verified": true
+}

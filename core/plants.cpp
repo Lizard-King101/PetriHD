@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "math.hpp"
+#include "tuning.hpp"
 #include "world.hpp"
 
 namespace phd {
@@ -221,58 +222,38 @@ void World::seed_plants() {
     update_canopy();
 }
 
-void World::plant_training_pond(const std::vector<PondPatch>& reed_beds) {
-    const auto plant_bed = [&](const PondPatch& bed) {
+// An arena's fodder: one low plant to a planted cell, on dry ground or under
+// water alike. Nothing grows or dies there; the arena's settings feed it.
+void World::plant_arena(const std::vector<ArenaPatch>& fodder_beds) {
+    const auto plant_bed = [&](const ArenaPatch& bed) {
         if (bed.x < 1 || bed.y < 1 || bed.width < 1 || bed.height < 1 ||
             bed.width > width() - 1 - bed.x || bed.height > height() - 1 - bed.y)
-            throw std::invalid_argument("A reed bed must lie entirely in pond water");
+            throw std::invalid_argument("A fodder bed must lie entirely inside the arena");
         for (int y = bed.y; y < bed.y + bed.height; ++y) for (int x = bed.x; x < bed.x + bed.width; ++x) {
             const int cell = y * width() + x;
-            if (occupant(cell, 0)) throw std::invalid_argument("Pond reed beds overlap");
-            if (place(reed, founder_reed, cell, 0, 2) < 0) throw std::logic_error("Pond has no room for its reeds");
+            if (occupant(cell, 0)) throw std::invalid_argument("Fodder beds overlap");
+            if (place(reed, founder_reed, cell, 0, 2) < 0) throw std::logic_error("The arena has no room for its fodder");
         }
     };
-    if (reed_beds.empty()) plant_bed({1, 1, width() - 2, height() - 2});
-    else for (const auto& bed : reed_beds) plant_bed(bed);
-    refill_training_pond();
+    if (fodder_beds.empty()) plant_bed({1, 1, width() - 2, height() - 2});
+    else for (const auto& bed : fodder_beds) plant_bed(bed);
+    refill_arena();
 }
 
-void World::refill_training_pond() {
+void World::regrow_arena() {
+    const int full = 8 + config_.arena_food;
+    // In sixteenths: this pass's whole share of a rate that need not be whole.
+    const auto pass = tick_ / animal_stagger;
+    const int gain = int(((pass + 1) * config_.arena_regrow >> 4) - (pass * config_.arena_regrow >> 4));
+    if (!gain) return;
+    for (auto& p : plants_) if (p.id) p.energy = std::min(full, p.energy + gain);
+}
+
+void World::refill_arena() {
     forage_.resize(cells(), 0);
     for (auto& p : plants_) if (p.id) {
-        p.energy = 8 + config_.pond_food;
-        forage_[p.cell] = config_.pond_food;
-    }
-}
-
-void World::seed_swimmer_pond(const std::vector<brain::Brain>& swimmer_pool, bool stock_food) {
-    if (tick_ || has_had_animals() || config_.layout != Layout::development)
-        throw std::logic_error("A swimmer pond needs a fresh development lake");
-    // Use the same bodies, positions and staggered clocks as the first
-    // large-swimmer family in a normal release. Keep their original IDs.
-    seed_animals(28, swimmer_pool);
-    std::size_t kept = 0;
-    for (std::size_t i = 0; i < animals_.size(); ++i) {
-        if (animals_[i].stock == FishStock::large_swimmer) {
-            animals_[kept] = animals_[i];
-            brains_[kept++] = brains_[i];
-        }
-    }
-    animals_.resize(kept);
-    brains_.resize(kept);
-    if (!stock_food) return;
-    for (const auto& a : animals_) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                const int cell = ((a.y >> 8) + dy) * width() + (a.x >> 8) + dx;
-                if (water(cell) != Water::lake) continue;
-                for (int slot = 0; slot < 4; ++slot) {
-                    if (occupant(cell, slot)) continue;
-                    const auto plant = place(reed, founder_reed, cell, slot, 2);
-                    if (plant >= 0) plants_[plant].energy = 600;
-                }
-            }
-        }
+        p.energy = 8 + config_.arena_food;
+        forage_[p.cell] = config_.arena_food;
     }
 }
 
@@ -382,7 +363,7 @@ void World::grow_plant(std::uint32_t index) {
     const int leaf = woody(p.genome) ? 8 + p.height / 6 : 4 + p.height / 2;
     const int made = dormant ? 0
                              : int(std::int64_t(std::min(leaf, 60)) * 4 * light / 256 * water / 256 * warmth / 256 *
-                                   fertility / 256);
+                                   fertility / 256) * tuning::plant_growth_percent / 100;
     int upkeep = 1 + p.height * (woody(p.genome) ? 1 : 2) / 28 + (g[gene_roots] + g[gene_bark] + g[gene_drought] +
                                                                  g[gene_cold] + g[gene_flood]) / 400;
     if (dormant) {

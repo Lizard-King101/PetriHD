@@ -387,18 +387,24 @@ std::uint32_t signature(const phd::World& world, int cx0, int cy0, int w, int h)
             sum = sum * 31 + std::uint32_t(kind) + (std::uint32_t(level) << 2);
         }
     }
-    for (int cy = std::max(0, cy0 - 1); cy < std::min(world.height(), cy0 + h + 1); ++cy) {
-        for (int cx = std::max(0, cx0 - 1); cx < std::min(world.width(), cx0 + w + 1); ++cx) {
+    for (int cy = std::max(0, cy0 - 2); cy < std::min(world.height(), cy0 + h + 2); ++cy) {
+        for (int cx = std::max(0, cx0 - 2); cx < std::min(world.width(), cx0 + w + 2); ++cx) {
             const auto cell = std::size_t(cy) * world.width() + cx;
-            // Each is taken as coarsely as the painting shows it.
-            std::uint32_t v = std::uint32_t(world.snow(cell) / 10);
-            v = v * 31 + std::uint32_t(world.burnt(cell) / 24);
-            v = v * 31 + std::uint32_t(world.canopy_cover(cell) / 32);
-            v = v * 31 + std::uint32_t(std::max(0, world.soil_water(cell) - 90) / 40);
-            v = v * 31 + std::uint32_t(world.temperature(cell) < -20) + (world.tree(cell) ? 2u : 0u);
+            // Include the painter's actual inputs, including neighbours that
+            // colour a blade crossing the patch edge. Bucketing snow or damp
+            // independently left an older edge beside freshly painted texels.
+            std::uint32_t v = std::uint32_t(world.snow(cell));
+            v = v * 31 + std::uint32_t(world.burnt(cell));
+            v = v * 31 + std::uint32_t(world.canopy_cover(cell));
+            v = v * 31 + std::uint32_t(std::max(0, world.soil_water(cell) - 90));
+            v = v * 31 + (world.tree(cell) ? 1u : 0u);
             for (int slot = 0; slot < 4; ++slot) {
                 if (const phd::Plant* p = world.occupant(cell, slot)) {
-                    v = v * 31 + (p->id & 1023) + 1 + ((p->flags & phd::plant_dormant) ? 4096u : 0u) + (p->health < 140 ? 8192u : 0u);
+                    v = v * 31 + p->id;
+                    v = v * 31 + std::min<int>(140, p->health) + ((p->flags & phd::plant_dormant) ? 256u : 0u);
+                    if (world.season() == 2 && !phd::evergreen(p->genome) && !(p->flags & phd::plant_dormant)) {
+                        v = v * 31 + std::uint32_t(std::clamp(150 - world.temperature(cell), 0, 90));
+                    }
                 } else {
                     v *= 31;
                 }

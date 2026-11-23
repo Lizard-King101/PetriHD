@@ -23,6 +23,7 @@ struct Corner {
     // comes and goes over it without moving it.
     // `painted` is for the single-mesh view.
     float bed = 0, level = dry, painted = 0;
+    float painted_bed = 0; // mean terrain under the single-mesh view's painted surface
     float flow_x = 0, flow_y = 0;
     bool ice = false;
     phd::Water kind = phd::Water::none; // water touching this corner before extending the surface under the bank

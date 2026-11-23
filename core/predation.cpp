@@ -3,9 +3,7 @@
 #include <algorithm>
 
 #include "math.hpp"
-#ifdef PETRIHD_SWIMMER_TRACE
-#include "swimmer_trace.hpp"
-#endif
+#include "tuning.hpp"
 
 namespace phd {
 namespace {
@@ -53,16 +51,38 @@ std::int32_t World::bite_target(const Animal& a, int length) const {
 }
 
 void World::strike(Animal& a, const Frame& body) {
-    a.energy -= 1 + body.upkeep / 2; // a missed lunge also costs energy
+    // A lunge, missed or not, takes wind.
+    a.stamina = std::uint16_t(std::max(0, int(a.stamina) - body.stamina / lunges_in_a_wind));
     const auto target = bite_target(a, body.length);
-    if (target < 0) return;
+    if (target < 0) {
+        if (observer_) observer_->struck(*this, a, nullptr, 0);
+        return;
+    }
     Animal& b = animals_[target];
-    const int damage = std::clamp(64 * body.length / body_length_mm(b.genome, b.growth), 8, 255);
+    // Where the blow comes from, as the struck body feels it, settles which
+    // part of it is hit.
+    const auto from = std::uint8_t(a.x == b.x && a.y == b.y ? a.heading + 128 : angle_of(a.x - b.x, a.y - b.y));
+    const bool head_on = std::abs(int(std::int8_t(std::uint8_t(from - b.heading)))) <= 48;
+    const int their_length = body_length_mm(b.genome, b.growth);
+    const int mouth = hardness(a.genome, a.growth, agene_hard_mouth);
+    const int part = hardness(b.genome, b.growth, head_on ? agene_hard_front : agene_hard_back);
+    // A longer body hits harder, a harder mouth harder still, and a hard
+    // part takes less of it.
+    const int damage = std::clamp(std::clamp(64 * body.length / their_length, 8, 255) * (128 + mouth) / (128 + part), 2, 255);
+    if (observer_) observer_->struck(*this, a, &b, damage);
     b.health = std::uint8_t(std::max(0, int(b.health) - damage));
     b.pain = std::uint8_t(std::min(damage, 127));
-    b.pain_bearing = std::uint8_t(a.x == b.x && a.y == b.y ? a.heading + 128 : angle_of(a.x - b.x, a.y - b.y));
+    b.pain_bearing = from;
+    // A mouth softer than what it bites is wounded by it.
+    if (part > mouth) {
+        const int recoil = std::clamp(64 * their_length / std::max(1, body.length), 8, 255) * (part - mouth) / 255;
+        a.health = std::uint8_t(std::max(0, int(a.health) - recoil));
+        a.pain = std::uint8_t(std::max<int>(a.pain, std::min(recoil, 127)));
+        a.pain_bearing = a.heading;
+        if (!a.health) leave_carcass(a, b.id, DeathCause::killed);
+    }
     if (!b.health) {
-        leave_carcass(b, a.id);
+        leave_carcass(b, a.id, DeathCause::killed);
         if (a.stock == FishStock::large_swimmer) {
             ++hunts_.kills;
             hunts_.small_fish_killed += b.stock == FishStock::small_fish;
@@ -78,13 +98,19 @@ void World::index_carcass(std::size_t index) {
     head = std::int32_t(index);
 }
 
-void World::leave_carcass(const Animal& a, std::uint32_t killer) {
-#ifdef PETRIHD_SWIMMER_TRACE
-    swimmer_trace::death(*this, a, killer);
-#endif
+int flesh_of(const Animal& a) {
     const Frame f = frame(a.genome, a.growth);
-    // Its remaining reserves plus the tissue energy used when building a body.
-    const int energy = std::max(1, f.mass75 / 4) + std::clamp(a.energy, 0, f.store);
+    const int grown = std::max(0, int(a.growth) - newborn_growth_of(a.genome));
+    return std::max(1, f.mass75 / 4) + grown * f.mass75 / 64;
+}
+
+void World::leave_carcass(const Animal& a, std::uint32_t killer, DeathCause cause) {
+    if (observer_) observer_->died(*this, a, cause, killer);
+    const Frame f = frame(a.genome, a.growth);
+    // Its remaining reserves plus the flesh itself: what it was born with,
+    // and most of what it has spent on growing since. Never more than it
+    // cost, so nothing gains by breeding young to eat.
+    const int energy = flesh_of(a) + std::clamp(a.energy, 0, f.store);
     carcasses_.push_back({a.x, a.y, energy, killer, std::uint16_t(f.length), a.heading});
     index_carcass(carcasses_.size() - 1);
 }
@@ -109,7 +135,7 @@ bool World::eat_meat(Animal& a, const Frame& f) {
         }
     });
     if (!meal) return false;
-    const int efficiency = std::min(255, 2 * a.genome.gene[agene_meat_gut]);
+    const int efficiency = std::max(1, std::min(255, 2 * a.genome.gene[agene_meat_gut]) * tuning::meat_percent / 100);
     const int room = f.store - a.energy;
     const int taken = std::min({meal->energy, f.bite * 8, (room * 255 + efficiency - 1) / efficiency});
     const int absorbed = std::min(room, (taken * efficiency + 127) / 255);
@@ -119,6 +145,7 @@ bool World::eat_meat(Animal& a, const Frame& f) {
     if (a.stock == FishStock::large_swimmer) {
         (meal->killer == a.id ? hunts_.own_kill_energy : hunts_.scavenged_energy) += absorbed;
     }
+    if (absorbed > 0 && observer_) observer_->ate_carcass(*this, a, absorbed, *meal);
     return absorbed > 0;
 }
 

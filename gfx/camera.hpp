@@ -14,11 +14,18 @@ struct Camera {
     float focus_z = 0;         // display height of the ground at the focus, in cells
     float zoom = 2;            // pixels per cell, as shown
     float target_zoom = 2;     // the power-of-two zoom it is moving to
+    bool tree_xray = false;   // viewer-only canopy cutaway
     bool top_down = false;     // lock the pitch at straight down
     bool shoreline_study = false; // show trunks and reeds in profile at habitat zoom
     float scale = 1;           // screen pixels per pixel of what is drawn: the pixel-art grid
 
     static constexpr float flat_limit = 32; // the last zoom that is always top-down
+    static constexpr float map_zoom = 24;   // baked map only at this zoom and below
+
+    float live_opacity() const {
+        const float t = std::clamp((zoom - map_zoom) / (flat_limit - map_zoom), 0.0f, 1.0f);
+        return t * t * (3 - 2 * t);
+    }
 
     // Pitch below the horizontal, in degrees: 90 to 32 px/cell, then 72 at
     // 64, 56 at 128 and 45 at 256, interpolated on log2(zoom).

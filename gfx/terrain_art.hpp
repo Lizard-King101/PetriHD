@@ -25,7 +25,7 @@ Sun sun_for(const phd::World& world);
 // crowns (it stands real trees in their places), with forest floor where the
 // crowns were.
 void bake(const phd::World& world, const Sun& sun, int tx0, int ty0, int w, int h, std::uint8_t* rgb, int stride,
-          bool flat = true);
+          bool flat = true, bool tree_xray = false);
 
 // The tree filling a cell, if any, as both views draw it: where it stands,
 // its size, its colour this season. From the plant itself.

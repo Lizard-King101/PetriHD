@@ -8,8 +8,10 @@ The valley runs down to the sea, with hills, streams, ponds, seasons,
 weather and fire. More than 100,000 plants can grow, compete, set seed,
 evolve, burn and come back. Each has its own genome.
 Animals sense food and neighbours, graze, hunt, call and mate
-using inherited brains. The development map starts with 48 founders.
-Its large swimmers can strike smaller fish and feed from their carcasses.
+using inherited brains. A new world starts with fifty bodies nobody
+designed; those built to hunt arrive in year 8. They have a reserve of
+food and a faster one of energy for sprinting, flying and lunging, and
+they sleep to get both back.
 [Animals and brain experiments](docs/ANIMALS.md) · [Plants](docs/PLANTS.md)
 
 ## Build
@@ -25,10 +27,21 @@ ctest --test-dir build
 - `build/petrihd`: the window. Drag to pan, scroll or pinch to zoom,
   long-press or right-click a cell to inspect it. Space pauses, 1–4 set the
   speed, H shows the current simulation tick and performance HUD, S saves,
-  and F12 takes a screenshot named for the tick.
-  `--seed N`, `--size 1024x600`, `--load FILE`, `--ticks N` (run ahead
+  and F12 takes a screenshot named for the tick. Press X or tap Tree X-ray
+  to see animals and ground through the canopy. Tap an animal to inspect
+  its three-quarter portrait. For captures, `--tree-xray` and `--top-down`
+  start with those views enabled.
+  The window opens at 800×480 for the Pi LCD. Drag a window edge or maximize
+  it to see more of the map at the same zoom. F11 toggles desktop fullscreen.
+  Use `--size 1600x900` for a larger starting window or `--fullscreen` to fill the display.
+  The default `--performance desktop` uses the usual two-screen-pixel art scale.
+  Use `--performance low` on the Pi or a slower desktop. It targets 30 FPS and
+  fits the world rendering into 400×240 pixels while keeping the controls at window resolution.
+  You can override either profile's art scale with `--pixel N`.
+  `--seed N`, `--load FILE`, `--ticks N` (run ahead
   first), `--shot FILE.png` (draw one frame and quit), `--frames N --speed
   0-3` (time N frames and quit).
+  From 24 to 32 px per cell the overhead map fades into live creatures and brush.
   Above 32 px per cell the camera tilts toward a three-quarter view (zoom up
   to 256); T locks it top-down and G turns it off. See
   [docs/RENDERING.md](docs/RENDERING.md).
@@ -61,19 +74,19 @@ capture hides the budget HUD and uses a fixed animation phase.
 
 ![Shoreline study with layered crowns, reeds and a creature at the water’s edge](docs/images/shoreline_study.png)
 
-## Large-swimmer training pond
+## The nursery
 
-Build `petrihd-nursery` and run `build/petrihd-nursery train build/lesson1 4 --visual`.
-Open `build/lesson1/nursery.html` to watch both swimmers eat, build mating
-drive and produce young. The batch ranks sixteen brains and tests the four
-retained brains on two fresh panels. [Lesson 1 and its first results](docs/ANIMALS.md#the-large-swimmer-nursery)
+Founder brains are bred before a world starts, in arenas where everything is
+set by a dial: every kind of founder climbs a ladder of levels, from eating
+when hungry to raising two generations on little food.
 
-Lesson 2 follows four selected swimmers as they forage among three reed
-beds and return to their partner. [Run Lesson 2 and compare the matched seeds](docs/ANIMALS.md#lesson-2-in-the-same-pond)
+```sh
+cmake --build build --target petrihd-nursery
+build/petrihd-nursery train build/nursery
+build/petrihd --dev-map --founders build/nursery/founders.phdb
+```
 
-The next nursery exercise breeds and selects four generations at each food
-refill interval. It follows naturally born young until they reproduce and
-exports the independently verified breeders. [Training protocol and results](docs/experiments/peer-breeding-batch1/README.md)
+Open `build/nursery/nursery.html` while it trains. [How the nursery works and what it has found](docs/NURSERY.md)
 
 ## Development map
 

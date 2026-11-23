@@ -27,11 +27,16 @@ enum AnimalGene : std::uint8_t {
     agene_pattern,    // plain, stripes, spots, pale belly
     agene_pattern_tone,
     agene_maturity,   // how long it takes to grow up
-    agene_investment, // many small broods of several young, or one at a time
+    agene_investment, // many small young at a time, or one large one
     agene_eyes,       // how far it sees
     agene_nose,       // none below 32, then keener
     agene_ears,       // none below 32, then hearing further
     agene_voice,      // the pitch of its call
+    // Hard tissue, part by part. Nothing here is a weapon or armour by name:
+    // when one body strikes another, the softer part takes the wound.
+    agene_hard_mouth, // what it strikes with
+    agene_hard_front, // head and shoulders: struck from ahead
+    agene_hard_back,  // flanks and rump: struck from the side or behind
     agene_count
 };
 
@@ -57,6 +62,7 @@ struct Frame {
     int upkeep;        // energy a metabolic pass, at rest
     int store;         // the most energy it can hold
     int bite;          // plant energy a mouthful
+    int stamina;       // what it holds for a burst: sprinting, lunging, staying in the air
 };
 
 // `growth` is how much of its adult length it has reached, out of 255.
@@ -65,13 +71,16 @@ inline int body_length_mm(const AnimalGenome& genome, int growth) {
     return (200 + genome.gene[agene_size] * 9) * growth / 255;
 }
 
+// How hard a part of it is now, 0..255: the young are soft.
+inline int hardness(const AnimalGenome& genome, int growth, AnimalGene part) { return genome.gene[part] * growth / 255; }
+
 // How unlike two genomes are. Two animals can breed only if this is small,
 // so kinds that drift apart stop interbreeding without that being coded.
 int genetic_distance(const AnimalGenome& a, const AnimalGenome& b);
 constexpr int breeding_distance = 240;
 
 enum class Medium : std::uint8_t { land, water, air };
-enum Wants : std::uint8_t { wants_eat = 1, wants_mate = 2, wants_fly = 4, wants_call = 8, wants_attack = 16 };
+enum Wants : std::uint8_t { wants_eat = 1, wants_mate = 2, wants_fly = 4, wants_call = 8, wants_attack = 16, wants_rest = 32 };
 
 // Maternal founder cohorts for the census. These labels never guide an action.
 enum class FishStock : std::uint8_t { other, small_fish, large_swimmer };
@@ -134,12 +143,45 @@ struct Animal {
     FishStock stock;
     HuntHistory hunting;
     std::uint16_t hunting_ancestors; // consecutive qualifying parents before this animal
+    // Its wind. `energy` above is its reserve of food, slow to fill and slow
+    // to empty; this is what a burst spends, refilled from that reserve
+    // while it goes easy.
+    std::uint16_t stamina;
 };
 
 constexpr int animal_stagger = 16;  // each animal's metabolism runs every 16 ticks
+// Every step is paid for from its wind, and its wind is refilled from its
+// reserve of food. Up to this pace it goes as fast as its frame says and
+// spends less than it gets back; above it, it sprints, up to twice that
+// speed, and spends far more.
+constexpr int cruise_pace = 176;
+constexpr int walk_ticks = 384;     // a full wind, spent at a steady cruise with none coming back, lasts this long
+constexpr int trudge_pace = 64;     // all one with no wind left can manage
+constexpr int wind_cost = 12;       // passes of upkeep a full wind costs to refill; half that lying still
+constexpr int sprint_gain = 334;    // so that flat out, pace 255, is twice the frame's speed
+constexpr int flight_wind = 24;     // wind a tick in the air costs
+constexpr int lunges_in_a_wind = 96;  // a lunge is short: refilling what it takes costs an eighth of a pass of upkeep
+constexpr int lunge_windup = 2;      // ticks from a contact decision to striking: fleeing prey can escape it
 constexpr int breath_ticks = 600;   // a full breath
 constexpr int flying_height_dm = 30;
-constexpr int newborn_growth = 96;
+constexpr int newborn_growth = 64;   // the smallest a newborn can be
+// How a body spends on its young is one gene, and it is a trade. With little
+// invested in each, a mother bears many at once, each born small: quick to
+// lose to a mouth, and a long time growing. With much invested she bears
+// one, born large. She spends on a brood only what she can spare, so a
+// hungry mother's brood is smaller than her genes allow. Which pays is for
+// the place to settle: where the young are eaten, many; where they are
+// safe and food is short, few.
+inline int brood_of(const AnimalGenome& genome) {
+    const int spread = 255 - genome.gene[agene_investment];
+    return 1 + spread * spread * 15 / (255 * 255); // 1 to 16
+}
+struct Animal;
+// The energy in a body's flesh, apart from its reserves: what it was born
+// with, and most of what it has spent on growing since.
+int flesh_of(const Animal& animal);
+
+inline int newborn_growth_of(const AnimalGenome& genome) { return newborn_growth + genome.gene[agene_investment] / 4; } // 64 to 127
 constexpr int mating_drive = 200;   // at this it looks for a mate
 constexpr std::uint8_t usual_hungry_drive_loss = 16;
 constexpr int mating_reach = 320;   // strictly less than 1.25 cells, in 1/256 cell

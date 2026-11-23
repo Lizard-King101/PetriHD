@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <tuple>
@@ -93,7 +94,14 @@ void main() {
         return;
     }
 #endif
-    gl_FragColor = texture2D(u_texture, v_uv) * v_color * u_tint;
+    vec4 tint = v_color;
+    // Mesh foliage is tagged only while X-ray is on. All canopy layers
+    // use the same art-pixel mask, so overlapping trees stay see-through.
+    if (tint.a > 0.93 && tint.a < 0.95) {
+        if (any(greaterThanEqual(mod(floor(gl_FragCoord.xy), 2.0), vec2(1.0)))) discard;
+        tint.a = 1.0;
+    }
+    gl_FragColor = texture2D(u_texture, v_uv) * tint * u_tint;
 }
 )";
 
@@ -129,6 +137,8 @@ void main() {
     sx += (a_uv.x + sway) * texel;
     float standing = floor(a_uv.y * u_trig.y + 0.5);
     float trunk_top = step(0.9, a_color.b);
+    // A trunk seen end-on still has a cross-section.
+    if (trunk_top > 0.5) standing = max(standing, floor(abs(a_uv.x) + 0.5));
     sy -= mix(a_uv.y, standing, trunk_top) * texel;
     // A grass or reed blade rises from its root. At steep camera pitches
     // bound its height by the scale at which the upright sprite was painted.
@@ -144,6 +154,7 @@ void main() {
 )";
 
 const char* sprite_fragment_source = R"(
+uniform float u_xray;
 uniform sampler2D u_texture;
 uniform vec4 u_tint;
 varying vec2 v_uv;
@@ -152,6 +163,8 @@ void main() {
     if (c.a < 0.5) {
         discard;
     }
+    if (u_xray > 0.5 && c.a > 0.92 && c.a < 0.97 &&
+        any(greaterThanEqual(mod(floor(gl_FragCoord.xy), 2.0), vec2(1.0)))) discard;
     // A texel that glows (art::sprites::glow_alpha) is not dimmed by the hour.
     gl_FragColor = vec4(c.a < 0.9 ? c.rgb : c.rgb * u_tint.rgb, 1.0);
 }
@@ -502,6 +515,10 @@ Texture make_animal_patterns() {
 } // namespace
 
 bool TiltView::init(const phd::World& world) {
+    gl::GLint max_texture = 0, max_buffer = 0;
+    gl::GetIntegerv(gl::MAX_TEXTURE_SIZE, &max_texture);
+    gl::GetIntegerv(gl::MAX_RENDERBUFFER_SIZE, &max_buffer);
+    animal_layer_limit_ = std::min(max_texture, max_buffer);
     static const char* const attributes[] = {"a_position", "a_uv", "a_color"};
     const std::string defines = shoreline_study_ ? "#define PAINTED_GROUND\n" : "";
     program_ = gl::program((defines + vertex_source).c_str(), (defines + fragment_source).c_str(), attributes, 3);
@@ -524,8 +541,6 @@ bool TiltView::init(const phd::World& world) {
         u_ground_window_ = gl::GetUniformLocation(program_, "u_ground_window");
         constexpr int patch_size = patch_cells * art::ground::texels_per_cell;
         constexpr int size = window_patches * patch_size;
-        tile_rgba_.resize(patch_size * patch_size * 4);
-        tile_half_.resize(tile_rgba_.size() / 4);
         ground_valid_ = make_texture(window_patches, window_patches, gl::RGBA, nullptr);
         for (Texture* texture : {&ground_, &ground_half_}) {
             *texture = make_texture(texture == &ground_ ? size : size / 2, texture == &ground_ ? size : size / 2, gl::RGBA, nullptr);
@@ -534,6 +549,35 @@ bool TiltView::init(const phd::World& world) {
         }
     }
     gl::GenBuffers(1, &scene_vbo_);
+    static const char* const animal_attributes[] = {"a_position", "a_normal", "a_uv", "a_color", "a_secondary"};
+    animal_program_ = gl::program(animal_vertex_source, animal_fragment_source, animal_attributes, 5);
+    if (!animal_program_) {
+        return false;
+    }
+    gl::UseProgram(animal_program_);
+    gl::Uniform1i(gl::GetUniformLocation(animal_program_, "u_patterns"), 0);
+    animal_patterns_ = make_animal_patterns();
+    a_focus_ = gl::GetUniformLocation(animal_program_, "u_focus");
+    a_trig_ = gl::GetUniformLocation(animal_program_, "u_trig");
+    a_zoom_ = gl::GetUniformLocation(animal_program_, "u_zoom");
+    a_screen_ = gl::GetUniformLocation(animal_program_, "u_screen");
+    a_depth_ = gl::GetUniformLocation(animal_program_, "u_depth");
+    a_depth_code_ = gl::GetUniformLocation(animal_program_, "u_depth_code");
+    a_tint_ = gl::GetUniformLocation(animal_program_, "u_tint");
+    a_ink_ = gl::GetUniformLocation(animal_program_, "u_ink");
+    a_nudge_ = gl::GetUniformLocation(animal_program_, "u_nudge");
+    a_under_ = gl::GetUniformLocation(animal_program_, "u_under");
+    gl::GenBuffers(1, &animal_vbo_);
+    static const char* const piece_attributes[] = {"a_position", "a_tile", "a_range"};
+    piece_program_ = gl::program(piece_vertex_source, piece_fragment_source, piece_attributes, 3, piece_directives);
+    if (!piece_program_) {
+        return false;
+    }
+    gl::UseProgram(piece_program_);
+    piece_depth_scale_ = gl::GetUniformLocation(piece_program_, "u_depth_scale");
+    piece_grid_ = gl::GetUniformLocation(piece_program_, "u_grid");
+    gl::Uniform1i(gl::GetUniformLocation(piece_program_, "u_texture"), 0);
+    gl::GenBuffers(1, &piece_vbo_);
     if (shoreline_study_) {
         sprite_program_ = gl::program(sprite_vertex_source, sprite_fragment_source, attributes, 3);
         if (!sprite_program_) {
@@ -551,25 +595,6 @@ bool TiltView::init(const phd::World& world) {
         h_alpha_ = gl::GetUniformLocation(shadow_program_, "u_alpha");
         gl::UseProgram(shadow_program_);
         gl::Uniform1i(gl::GetUniformLocation(shadow_program_, "u_texture"), 0);
-        static const char* const animal_attributes[] = {"a_position", "a_normal", "a_uv", "a_color", "a_secondary"};
-        animal_program_ = gl::program(animal_vertex_source, animal_fragment_source, animal_attributes, 5);
-        if (!animal_program_) {
-            return false;
-        }
-        gl::UseProgram(animal_program_);
-        gl::Uniform1i(gl::GetUniformLocation(animal_program_, "u_patterns"), 0);
-        animal_patterns_ = make_animal_patterns();
-        a_focus_ = gl::GetUniformLocation(animal_program_, "u_focus");
-        a_trig_ = gl::GetUniformLocation(animal_program_, "u_trig");
-        a_zoom_ = gl::GetUniformLocation(animal_program_, "u_zoom");
-        a_screen_ = gl::GetUniformLocation(animal_program_, "u_screen");
-        a_depth_ = gl::GetUniformLocation(animal_program_, "u_depth");
-        a_depth_code_ = gl::GetUniformLocation(animal_program_, "u_depth_code");
-        a_tint_ = gl::GetUniformLocation(animal_program_, "u_tint");
-        a_ink_ = gl::GetUniformLocation(animal_program_, "u_ink");
-        a_nudge_ = gl::GetUniformLocation(animal_program_, "u_nudge");
-        a_under_ = gl::GetUniformLocation(animal_program_, "u_under");
-        gl::GenBuffers(1, &animal_vbo_);
         static const char* const shadow_attributes[] = {"a_position", "a_mark", "a_axes"};
         animal_shadow_program_ = gl::program(animal_shadow_vertex_source, animal_shadow_fragment_source, shadow_attributes, 3);
         if (!animal_shadow_program_) {
@@ -578,16 +603,6 @@ bool TiltView::init(const phd::World& world) {
         animal_shadow_size_ = gl::GetUniformLocation(animal_shadow_program_, "u_size");
         animal_shadow_texels_ = gl::GetUniformLocation(animal_shadow_program_, "u_texels");
         gl::GenBuffers(1, &animal_shadow_vbo_);
-        static const char* const piece_attributes[] = {"a_position", "a_tile", "a_range"};
-        piece_program_ = gl::program(piece_vertex_source, piece_fragment_source, piece_attributes, 3, piece_directives);
-        if (!piece_program_) {
-            return false;
-        }
-        gl::UseProgram(piece_program_);
-        piece_depth_scale_ = gl::GetUniformLocation(piece_program_, "u_depth_scale");
-        piece_grid_ = gl::GetUniformLocation(piece_program_, "u_grid");
-        gl::Uniform1i(gl::GetUniformLocation(piece_program_, "u_texture"), 0);
-        gl::GenBuffers(1, &piece_vbo_);
         water_program_ = gl::program(water_vertex_source, water_fragment_source, attributes, 3);
         if (!water_program_) {
             return false;
@@ -637,6 +652,7 @@ bool TiltView::init(const phd::World& world) {
         s_tint_ = gl::GetUniformLocation(sprite_program_, "u_tint");
         s_wind_ = gl::GetUniformLocation(sprite_program_, "u_wind");
         s_texel_ = gl::GetUniformLocation(sprite_program_, "u_texel");
+        s_xray_ = gl::GetUniformLocation(sprite_program_, "u_xray");
         s_view_ = gl::GetUniformLocation(sprite_program_, "u_view");
         gl::UseProgram(sprite_program_);
         gl::Uniform1i(gl::GetUniformLocation(sprite_program_, "u_texture"), 0);
@@ -674,6 +690,7 @@ void TiltView::build_heights(const phd::World& world) {
         for (int i = 0; i <= width_; ++i) {
             const auto& c = field.corner(i, j);
             const float now = (shoreline_study_ ? c.bed : c.painted) * relief_;
+            const float bed = shoreline_study_ ? c.bed : c.painted_bed;
             const float level = shoreline_study_ ? c.level : dry;
             const float plane = shoreline_study_ && i < width_ && j < height_ ? field.plane(i, j) : dry;
             const auto center = shoreline_study_ && i < width_ && j < height_ ? c.center : art::water::CellCenter{};
@@ -681,11 +698,11 @@ void TiltView::build_heights(const phd::World& world) {
             const auto at = std::size_t(j) * (width_ + 1) + i;
             auto& water = water_[at];
             const bool ground_moved = corners_[at] != now || water.center.bed != center.bed;
-            const bool water_moved = water.level != level || water.bed != c.bed || water.plane != plane ||
+            const bool water_moved = water.level != level || water.bed != bed || water.plane != plane ||
                                      water.ice != c.ice || water.flow_x != fx || water.flow_y != fy ||
                                      water.center.level != center.level;
             corners_[at] = now;
-            water = {level, c.bed, plane, fx, fy, c.ice, center};
+            water = {level, bed, plane, fx, fy, c.ice, center};
             if (chunks_.empty() || (!ground_moved && !water_moved)) {
                 continue;
             }
@@ -867,38 +884,23 @@ void TiltView::refresh(const phd::World& world, int count) {
 }
 
 // One 4 x 4-cell patch, uploaded at both scales before the shader can see it.
-void TiltView::paint_ground(const phd::World& world, int patch_x, int patch_y) {
+void TiltView::upload_ground(int patch_x, int patch_y, const std::vector<std::uint8_t>& pixels, const std::vector<std::uint8_t>& half) {
+    const auto start = std::chrono::steady_clock::now();
     constexpr int size = patch_cells * art::ground::texels_per_cell;
-    art::ground::paint(world, patch_x * size, patch_y * size, size, size, tile_rgba_.data(), size * 4, false);
     const int px = (patch_x % window_patches) * size, py = (patch_y % window_patches) * size;
-    update_texture_region(ground_, px, py, size, size, gl::RGBA, tile_rgba_.data());
-    for (int y = 0; y < size / 2; ++y) {
-        for (int x = 0; x < size / 2; ++x) {
-            const auto* in = &tile_rgba_[(std::size_t(2 * y) * size + 2 * x) * 4];
-            auto* out = &tile_half_[(std::size_t(y) * (size / 2) + x) * 4];
-            for (int c = 0; c < 3; ++c) {
-                out[c] = std::uint8_t((in[c] + in[4 + c] + in[size * 4 + c] + in[size * 4 + 4 + c] + 2) / 4);
-            }
-            out[3] = 255;
-        }
-    }
-    update_texture_region(ground_half_, px / 2, py / 2, size / 2, size / 2, gl::RGBA, tile_half_.data());
+    update_texture_region(ground_, px, py, size, size, gl::RGBA, pixels.data());
+    update_texture_region(ground_half_, px / 2, py / 2, size / 2, size / 2, gl::RGBA, half.data());
+    ground_upload_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
-bool TiltView::update_ground(const phd::World& world, const Camera& camera, int screen_w, int view_h, bool capture) {
-    using Clock = std::chrono::steady_clock;
-    const auto start = Clock::now();
-    ++ground_frame_;
+bool TiltView::schedule_ground(const phd::World& world, const Camera& camera, int screen_w, int view_h, TerrainBatch* batch) {
+    if (!shoreline_study_) return true;
     // Keep the coverage bounds aligned to eight-cell tiles at both zoom levels.
     const auto first_patch = [](float focus) {
         return 2 * int(std::floor(focus / (2 * patch_cells))) - window_patches / 2;
     };
     const int first_x = first_patch(camera.cx), first_y = first_patch(camera.cy);
-    const auto wrap = [](int i) { return (i % window_patches + window_patches) % window_patches; };
-    const auto patch_at = [&](int x, int y) -> GroundPatch& {
-        return ground_patches_[std::size_t(wrap(y)) * window_patches + wrap(x)];
-    };
-    bool mask_changed = ground_frame_ == 1 || window_x_ != first_x || window_y_ != first_y;
+    if (window_x_ != first_x || window_y_ != first_y) ground_mask_dirty_ = true;
     window_x_ = first_x;
     window_y_ = first_y;
 
@@ -911,64 +913,46 @@ bool TiltView::update_ground(const phd::World& world, const Camera& camera, int 
     const int x1 = std::min({tile_start(gx1 + 1) + 1, first_x + window_patches - 1, (width_ - 1) / patch_cells});
     const int y1 = std::min({tile_start(gy1 + 4) + 1, first_y + window_patches - 1, (height_ - 1) / patch_cells});
 
-    const auto signature = [&](int x, int y) {
-        return art::ground::signature(world, x * patch_cells, y * patch_cells, patch_cells, patch_cells);
-    };
-    const auto fill = [&](int x, int y) {
-        paint_ground(world, x, y);
-        patch_at(x, y) = {x, y, signature(x, y), world.tick(), ground_frame_};
-        mask_changed = true;
-    };
-    int missing = 0, nearest_x = 0, nearest_y = 0;
-    float nearest = std::numeric_limits<float>::max();
+    bool ready = true;
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
-            if (patch_at(x, y).contains(x, y)) continue;
-            if (capture) {
-                fill(x, y);
-                continue;
-            }
-            ++missing;
-            const float dx = (x + 0.5f) * patch_cells - camera.cx;
-            const float dy = (y + 0.5f) * patch_cells - camera.cy;
-            const float distance = dx * dx + dy * dy;
-            if (distance < nearest) {
-                nearest = distance;
-                nearest_x = x;
-                nearest_y = y;
-            }
-        }
-    }
-    if (missing) fill(nearest_x, nearest_y);
-
-    // Once present, patches only need checking after a tick. Repaint at most
-    // one changed patch every other interactive frame. A capture drains them.
-    if ((capture || (missing == 0 && (ground_frame_ & 1))) && x1 >= x0 && y1 >= y0) {
-        const int across = x1 - x0 + 1, visible = across * (y1 - y0 + 1);
-        for (int k = 0; k < visible; ++k) {
-            const int at = (ground_cursor_ + k) % visible;
-            const int x = x0 + at % across, y = y0 + at / across;
-            auto& patch = patch_at(x, y);
-            if (patch.checked_tick == world.tick() || (!capture && ground_frame_ - patch.painted_frame < 30)) {
-                continue;
-            }
-            patch.checked_tick = world.tick();
-            const auto current = signature(x, y);
-            if (patch.signature != current) {
-                paint_ground(world, x, y);
-                patch.signature = current;
-                patch.painted_frame = ground_frame_;
-                if (!capture) {
-                    ground_cursor_ = (at + 1) % visible;
-                    break;
+            const auto slot = std::size_t(y % window_patches) * window_patches + x % window_patches;
+            const GroundPatch previous = ground_patches_[slot];
+            const bool present = previous.contains(x, y);
+            if (present && previous.checked_tick == world.tick()) continue;
+            if (!present) ready = false;
+            if (!batch) continue;
+            batch->add([=](const phd::World& source) {
+                const auto signature = art::ground::signature(source, x * patch_cells, y * patch_cells, patch_cells, patch_cells);
+                std::vector<std::uint8_t> pixels, half;
+                if (!present || previous.signature != signature) {
+                    constexpr int size = patch_cells * art::ground::texels_per_cell;
+                    pixels.resize(size * size * 4);
+                    art::ground::paint(source, x * size, y * size, size, size, pixels.data(), size * 4, false);
+                    half = half_terrain<4>(pixels, size, size);
                 }
-            }
+                return [=, pixels = std::move(pixels), half = std::move(half), tick = source.tick()] {
+                    if (!pixels.empty()) upload_ground(x, y, pixels, half);
+                    ground_patches_[slot] = {x, y, signature, tick, true};
+                    if (!present) ground_mask_dirty_ = true;
+                };
+            });
         }
     }
+    return ready;
+}
 
-    // Only this 1 KiB map changes ownership on a jump. Unwritten or reused
-    // texture memory never needs clearing and cannot appear at another bank.
-    if (mask_changed) {
+void TiltView::bind_ground(const Camera& camera) {
+    ground_ms_ = ground_ms_ * 0.95 + ground_upload_ms_ * 0.05;
+    ground_ms_max_ = std::max(ground_ms_max_, ground_upload_ms_);
+    ground_upload_ms_ = 0;
+    const int first_x = window_x_, first_y = window_y_;
+    if (ground_mask_dirty_) {
+        ground_mask_dirty_ = false;
+        const auto wrap = [](int i) { return (i % window_patches + window_patches) % window_patches; };
+        const auto patch_at = [&](int x, int y) -> const GroundPatch& {
+            return ground_patches_[std::size_t(wrap(y)) * window_patches + wrap(x)];
+        };
         std::array<std::uint32_t, window_patches * window_patches> valid;
         for (int y = 0; y < window_patches; ++y) {
             for (int x = 0; x < window_patches; ++x) {
@@ -988,18 +972,24 @@ bool TiltView::update_ground(const phd::World& world, const Camera& camera, int 
     gl::BindTexture(gl::TEXTURE_2D, camera.zoom >= 45 ? ground_.id : ground_half_.id);
     gl::ActiveTexture(gl::TEXTURE0);
 
-    const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
-    ground_ms_ = ground_ms_ * 0.95 + ms * 0.05;
-    ground_ms_max_ = std::max(ground_ms_max_, ms);
-    return missing <= 1;
 }
 
-float TiltView::ground(float x, float y) const {
+float TiltView::sample_ground(float x, float y, bool walking, bool* near_water) const {
     x = std::clamp(x, 0.0f, float(width_) - 0.001f);
     y = std::clamp(y, 0.0f, float(height_) - 0.001f);
     const int i = int(x), j = int(y);
     const float fx = x - float(i), fy = y - float(j);
-    const auto at = [&](int a, int b) { return drawn_[std::size_t(b) * (width_ + 1) + a]; };
+    const auto at = [&](int a, int b) {
+        const auto index = std::size_t(b) * (width_ + 1) + a;
+        const float mesh = drawn_[index];
+        if (!walking) return mesh;
+        const auto& water = water_[index];
+        // The single-mesh map draws the water as opaque terrain. Put feet
+        // on its underlying bed so that surface can occlude them.
+        const float bed = shoreline_study_ ? mesh : std::min(mesh, water.bed * relief_);
+        if (near_water && (water.level != dry || mesh - bed > 0.0001f)) *near_water = true;
+        return bed;
+    };
     // Sample the triangles actually uploaded, including a measured hollow
     // while other chunks are waiting to be refreshed.
     return art::water::interpolate(at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1), fx, fy,
@@ -1106,9 +1096,24 @@ void TiltView::add_mesh_shadow(const Animal& animal, art::Sun sun, const ShadowP
     };
     std::vector<V3> points;
     points.reserve(animal.end_vertex - animal.first_vertex);
+    // The draw mesh repeats positions at face and pattern seams. Trace a shared
+    // corner once per pose, comparing all three coordinates on a cache hit.
+    struct ShadowCorner { const creature::Vertex* source; V3 projected; };
+    std::array<ShadowCorner, 128> corners{};
+    const auto bits = [](float value) {
+        std::uint32_t result;
+        std::memcpy(&result, &value, sizeof(result));
+        return result;
+    };
     float min_x = width - placed_x, min_y = height - placed_y, max_x = -placed_x, max_y = -placed_y;
     for (std::size_t i = animal.first_vertex; i < animal.end_vertex; ++i) {
-        const V3 p = cast(animal_vertices_[i]);
+        const auto& v = animal_vertices_[i];
+        const auto hash = phd::mix(bits(v.x) ^ (bits(v.y) << 1) ^ (bits(v.z) << 2));
+        auto& corner = corners[hash % corners.size()];
+        if (!corner.source || corner.source->x != v.x || corner.source->y != v.y || corner.source->z != v.z) {
+            corner = {&v, cast(v)};
+        }
+        const V3 p = corner.projected;
         points.push_back(p);
         min_x = std::min(min_x, p.x), max_x = std::max(max_x, p.x);
         min_y = std::min(min_y, p.y), max_y = std::max(max_y, p.y);
@@ -1271,6 +1276,7 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
                            int view_h) {
     scene_vertices_.clear();
     trees_ = 0;
+    const std::uint8_t canopy_alpha = camera.tree_xray ? art::sprites::foliage_alpha : 255;
     float wu, wv;
     font.white(wu, wv);
     const auto sun_art = art::sun_for(world);
@@ -1357,7 +1363,7 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
                 }
                 ++trees_;
                 const float g = ground(t.x, t.y), r = t.radius, h = std::max(1.2f, t.height);
-                const Color leaves{t.r, t.g, t.b, 255}, bark{96, 72, 50, 255};
+                const Color leaves{t.r, t.g, t.b, canopy_alpha}, bark{96, 72, 50, 255};
                 // Sway: the crown leans with the wind and rocks, more for tall
                 // trees and strong wind, each tree on its own beat.
                 const float gust = float(world.wind_speed()) / 96.0f;
@@ -1441,8 +1447,8 @@ void TiltView::build_scene(const phd::World& world, const Camera& camera, const 
     }
     if (!shoreline_study_) {
         frustum(tx, ty, tz - 0.05f, tz + 1.0f, 0.10f, 0.06f, 6, {112, 80, 52, 255});
-        frustum(tx, ty, tz + 0.7f, tz + 1.3f, 0.45f, 0.75f, 7, {58, 118, 54, 255});
-        frustum(tx, ty, tz + 1.3f, tz + 2.3f, 0.75f, 0.0f, 7, {66, 132, 58, 255});
+        frustum(tx, ty, tz + 0.7f, tz + 1.3f, 0.45f, 0.75f, 7, {58, 118, 54, canopy_alpha});
+        frustum(tx, ty, tz + 1.3f, tz + 2.3f, 0.75f, 0.0f, 7, {66, 132, 58, canopy_alpha});
     }
 
     if (shoreline_study_) {
@@ -1532,6 +1538,30 @@ const TiltView::Sprite* TiltView::sprite(const art::sprites::Spec& spec) {
     const auto key = spec.key();
     if (const auto found = sprite_cache_.find(key); found != sprite_cache_.end()) {
         return &found->second;
+    }
+    using art::sprites::Kind;
+    if ((spec.kind == Kind::crown && !(spec.state & art::sprites::bare)) || spec.kind == Kind::bough) {
+        // Large crowns would otherwise need three full-size atlas entries for
+        // every small difference in growth. Share a painting across adjacent
+        // sizes, scaling its offsets about the trunk to keep the true reach.
+        auto shape = spec;
+        if (spec.radius > 16) shape.radius = std::uint16_t(std::min(48, (spec.radius + 4) / 8 * 8));
+        if (spec.kind == Kind::bough && spec.height > 8) {
+            const float height = float(spec.height) * shape.radius / spec.radius;
+            shape.height = std::uint16_t(std::max(6, int(height / 6 + 0.5f) * 6));
+        }
+        if (shape.key() != key) {
+            const Sprite* shared = sprite(shape);
+            if (!shared) return nullptr;
+            Sprite fitted = *shared;
+            const float scale = float(spec.radius) / shape.radius;
+            fitted.w = int(std::round(fitted.w * scale));
+            fitted.h = int(std::round(fitted.h * scale));
+            fitted.anchor = int(std::round(fitted.anchor * scale));
+            fitted.anchor_y = int(std::round(fitted.anchor_y * scale));
+            fitted.spec = spec;
+            return &sprite_cache_.emplace(key, fitted).first->second;
+        }
     }
     // Once the atlas is full nothing more is painted until it is emptied:
     // painting a sprite only to find no room for it, for every new plant,
@@ -1630,26 +1660,34 @@ const TiltView::Sprite* TiltView::add_tree(PlantMesh& mesh, float x, float y, fl
     Spec spec;
     spec.r = cr, spec.g = cg, spec.b = cb;
     const Sprite* caster = nullptr;
+    const auto add_views = [&](float lift, float swing) {
+        const Sprite* overhead = nullptr;
+        for (int view = 0; view < views; ++view) {
+            spec.view = std::uint8_t(view);
+            if (const Sprite* s = sprite(spec)) {
+                add_sprite(mesh, *s, x, y, z, swing, id, Stand::rigid, lift, s->anchor_y, std::uint8_t(view + 1));
+                if (view == views - 1) overhead = s;
+            }
+        }
+        return overhead;
+    };
     if (conifer) {
         // Tiers of boughs up the trunk, each narrower than the one below and
-        // standing a little in front of it, as a cone's skirt does.
+        // centered on it even when seen from directly overhead.
         const float reach = r * 0.7f, stem = std::max(0.15f, h / 9);
         const int tiers = std::clamp(int(h * tpc * rise / 9), 3, 9);
         const float step = (h - stem) / float(tiers);
-        trunk(stem + step * 1.5f, std::clamp(reach * tpc * 0.16f, 1.0f, 7.0f), sway * (stem + step) / h);
+        trunk(h - step, std::clamp(reach * tpc * 0.16f, 1.0f, 7.0f), sway * (h - step) / h);
         for (int k = 0; k < tiers; ++k) {
             const bool last = k == tiers - 1;
             const float wide = reach * std::pow(1 - float(k) / float(tiers), 0.8f), up = stem + step * float(k);
             spec.kind = Kind::bough;
             spec.radius = std::uint16_t(std::clamp(quantise(wide * tpc, 2), 2, 500));
-            spec.height = std::uint16_t(
-                std::clamp(quantise(step * tpc * rise * (last ? 1.0f : 1.7f) + wide * tpc * 0.45f, 2), 4, 1000));
+            spec.height = std::uint16_t(std::clamp(quantise(step * tpc * (last ? 1.0f : 1.5f), 2), 4, 1000));
             spec.state = last ? tip : 0;
             spec.variant = std::uint8_t((id + unsigned(k)) % 2);
-            if (const Sprite* s = sprite(spec)) {
-                add_sprite(mesh, *s, x, y + wide * 0.5f, z, sway * (up + step) / h, id, Stand::rigid, up);
-                caster = caster ? caster : s; // the lowest and widest tier
-            }
+            const Sprite* overhead = add_views(up, sway * (up + step) / h);
+            if (!caster) caster = overhead; // the lowest, widest tier
         }
         return caster;
     }
@@ -1667,15 +1705,8 @@ const TiltView::Sprite* TiltView::add_tree(PlantMesh& mesh, float x, float y, fl
         // the camera is at. The one from straight above is also the shadow.
         spec.variant = std::uint8_t(limbs < 1 ? id % 4 : id % 2);
         spec.form = std::uint8_t(form == std::uint8_t(Form::columnar) ? form : 0);
-        for (int view = 0; view < views; ++view) {
-            spec.view = std::uint8_t(view);
-            if (const Sprite* s = sprite(spec)) {
-                add_sprite(mesh, *s, x, y, z, sway, id, Stand::rigid, lift, s->anchor_y, std::uint8_t(view + 1));
-                caster = s;
-            }
-        }
-        return caster;
     }
+    if (leafless || form != std::uint8_t(Form::round)) return add_views(lift, sway);
     if (const Sprite* s = sprite(spec)) {
         add_sprite(mesh, *s, x, y, z, sway, id, Stand::rigid, lift, s->anchor_y);
         caster = s;
@@ -1731,7 +1762,7 @@ void TiltView::build_plant_row(const phd::World& world, int cy, int x0, int x1) 
                                             (t.r & 0xe0) | 0x10, (t.g & 0xe0) | 0x10, (t.b & 0xe0) | 0x10, t.id, t.form, t.pale,
                                             wading(t.x, t.y), t.snag ? 0.4f : 1.0f);
             if (caster && !wet) {
-                shadow(*caster, t.x - plant_sun_.x * t.reach() * 0.8f, t.y - plant_sun_.y * t.reach() * 0.8f, t.bare ? 1 / tpc : lying);
+                shadow(*caster, t.x - plant_sun_.x * t.reach() * 0.8f, t.y - plant_sun_.y * t.reach() * 0.8f, t.bare || t.conifer || t.form != std::uint8_t(Form::round) ? 1 / tpc : lying);
             }
             if (!t.snag) {
                 continue; // a living tree has the cell to itself; under a snag the rest grows on
@@ -1761,20 +1792,27 @@ void TiltView::build_plant_row(const phd::World& world, int cy, int x0, int x1) 
                 const float reach = std::min(0.58f, std::min(0.3f, 0.1f + hh * 0.2f) + 0.16f * hh);
                 const bool leafless = dormant && !phd::evergreen(p->genome);
                 const bool cone = phd::evergreen(p->genome) && genes[phd::gene_cold] >= 150;
-                float front; // how far south of its spot the sprite touches the ground, at 55 degrees
+                pigment(spec, *p);
                 if (cone) {
                     spec.kind = Kind::cone_bush;
                     spec.radius = std::uint16_t(quantise(reach * 0.6f * tpc, 2));
-                    spec.height = std::uint16_t(quantise(hh * tpc * rise * 1.15f + 3, 2));
-                    front = 0.1f;
-                } else {
-                    // A dome: its top at the shrub's height, its near edge on the ground in front.
-                    spec.kind = Kind::bush;
-                    spec.radius = std::uint16_t(quantise(reach * tpc, 2));
-                    spec.height = std::uint16_t(quantise(hh * tpc * rise + reach * tpc * lie * 0.5f, 2));
-                    front = reach * 0.5f;
+                    spec.height = std::uint16_t(quantise(hh * tpc, 2));
+                    for (int view = 0; view < views; ++view) {
+                        spec.view = std::uint8_t(view);
+                        if (const Sprite* s = sprite(spec)) {
+                            add_sprite(plant_mesh_, *s, x, y, ground(x, y) + wade, hh * 0.03f * tpc, p->id,
+                                       Stand::rooted, 0, s->anchor_y, std::uint8_t(view + 1));
+                            if (view == views - 1 && !wet && hh > 0.4f)
+                                shadow(*s, x - plant_sun_.x * reach * 0.5f, y - plant_sun_.y * reach * 0.5f, 1 / tpc);
+                        }
+                    }
+                    continue;
                 }
-                pigment(spec, *p);
+                // The near edge of the dome touches the ground in front at 55 degrees.
+                const float front = reach * 0.5f;
+                spec.kind = Kind::bush;
+                spec.radius = std::uint16_t(quantise(reach * tpc, 2));
+                spec.height = std::uint16_t(quantise(hh * tpc * rise + front * tpc * lie, 2));
                 spec.state = leafless ? bare : 0;
                 const Sprite* s = sprite(spec);
                 if (s) {
@@ -1785,11 +1823,7 @@ void TiltView::build_plant_row(const phd::World& world, int cy, int x0, int x1) 
                 }
                 if (s && !leafless && !wet && hh > 0.4f) {
                     // A bush's sprite stands up; its shadow is the same outline, shorter.
-                    if (cone) {
-                        shadow(*s, x - plant_sun_.x * reach * 0.5f, y + front * 0.6f - plant_sun_.y * reach * 0.5f, lying * 0.25f, true);
-                    } else {
-                        shadow(*s, x - plant_sun_.x * reach * 0.5f, y + front * 0.5f - plant_sun_.y * reach * 0.5f, lying * 0.6f);
-                    }
+                    shadow(*s, x - plant_sun_.x * reach * 0.5f, y + front * 0.5f - plant_sun_.y * reach * 0.5f, lying * 0.6f);
                 }
                 continue;
             }
@@ -2096,6 +2130,7 @@ bool TiltView::draw_plants(const phd::World& world, const Camera& camera, const 
     gl::Uniform2f(s_wind_, gust * (across < 0 ? std::min(across, -0.35f) : std::max(across, 0.35f)),
                   float(std::fmod(time * 1.7, 6.283185307179586)));
     gl::Uniform1f(s_texel_, 1.0f / float(atlas_height));
+    gl::Uniform1f(s_xray_, camera.tree_xray ? 1.0f : 0.0f);
     gl::Uniform1f(s_view_, float(1 + art::sprites::view_for(std::asin(std::min(1.0f, camera.sin_pitch())) * 57.29578f)));
     gl::BindTexture(gl::TEXTURE_2D, atlas_.id);
     const auto draw_sprites = [&](gl::GLuint vbo, int vertices) {
@@ -2256,6 +2291,28 @@ creature::Body animal_body(const phd::AnimalGenome& genome, int growth) {
     body.tail_fin = fin * 0.36f, body.dorsal_fin = fin * 0.24f, body.side_fins = fin * 0.28f;
     body.wing = float(f.wing) * cell;
     body.eye = body.head * 0.26f;
+    // Display frills follow the inherited call pitch independently of hard tissue.
+    body.frill = genome.gene[phd::agene_voice] >= 128;
+    const auto hardness = [&](phd::AnimalGene part) { return phd::hardness(genome, growth, part) / 255.0f; };
+    body.mouth_hardness = hardness(phd::agene_hard_mouth);
+    body.front_hardness = hardness(phd::agene_hard_front);
+    body.back_hardness = hardness(phd::agene_hard_back);
+    if (!body.leg_pairs && body.side_fins > 0) {
+        body.length *= 1.04f;
+        body.girth *= 0.94f;
+        body.tail *= 1.12f;
+        body.head *= 1.12f;
+        body.eye *= 1.18f;
+    } else {
+        body.length *= 0.97f;
+        body.girth *= 1.10f;
+        body.head *= body.frill ? 1.65f : 1.42f;
+        body.eye *= 1.52f;
+        body.neck = std::max(body.neck * 0.88f, body.head * 0.60f);
+        body.snout *= body.wing > 0 ? 1.90f : 1.06f;
+        body.tail *= 1.05f;
+        body.leg_girth *= 1.28f;
+    }
     body.primary = pigment(genome.gene[phd::agene_hue], genome.gene[phd::agene_tone], 120);
     body.secondary = pigment(genome.gene[phd::agene_hue] + 6, genome.gene[phd::agene_pattern_tone], 50);
     body.pattern = creature::Pattern(genome.gene[phd::agene_pattern] / 64);
@@ -2272,18 +2329,40 @@ float TiltView::animal_height(const phd::Animal& a) const {
         const float sunk = a.z ? float(a.z) * 0.1f * relief_ : body.girth * 0.5f;
         return level == dry ? ground(x, y) + body.girth : std::max(ground(x, y) + body.girth, level - sunk);
     }
-    return ground(x, y) + creature::ride_height(body) + (medium == phd::Medium::air ? float(a.z) * 0.1f * relief_ : 0.0f);
+    return sample_ground(x, y, medium == phd::Medium::land) + creature::ride_height(body)
+           + (medium == phd::Medium::air ? float(a.z) * 0.1f * relief_ : 0.0f);
 }
 
 void TiltView::pose_world_animals(const phd::World& world, const Camera& camera, int screen_w, int view_h) {
     animals_.clear();
     ++eased_frame_;
-    const float reach_x = float(screen_w) / (2 * camera.px()) + 3;
-    const float reach_y = float(view_h) / (2 * camera.px() * camera.sin_pitch()) + 6;
+    // Test the posed animal in the same camera space as its rasterized mesh.
+    // The extra reach keeps partial wings, tails and nearby shadow casters.
+    const float px = camera.px(), sp = camera.sin_pitch(), cp = camera.cos_pitch();
+    const float half_w = screen_w / (2 * px), half_h = view_h / (2 * px);
+    const auto visible = [&](const creature::Body& body, const creature::Pose& pose) {
+        const float radius = std::max(6.0f, body.length + body.girth + std::max({body.wing, body.tail, body.leg_length}));
+        if (std::abs(pose.x - camera.cx) > half_w + radius) return false;
+        const bool land = pose.medium == creature::Medium::land;
+        const float z = land ? sample_ground(pose.x, pose.y, true) + creature::ride_height(body) : pose.height;
+        const float y = (pose.y - camera.cy) * sp - (z - camera.focus_z) * cp;
+        if (std::abs(y) <= half_h + radius * (sp + cp)) return true;
+        if (!land) return false;
+        // On a steep bank the spine extrapolates the grade from hips to shoulders.
+        const float dx = std::cos(pose.heading) * body.length * 0.35f;
+        const float dy = std::sin(pose.heading) * body.length * 0.35f;
+        const float hip = sample_ground(pose.x - dx, pose.y - dy, true), shoulder = sample_ground(pose.x + dx, pose.y + dy, true);
+        const float middle = (hip + shoulder) * 0.5f + creature::ride_height(body);
+        const float grade = std::abs(hip - shoulder) / std::max(0.001f, body.length * 0.7f);
+        return std::abs((pose.y - camera.cy) * sp - (middle - camera.focus_z) * cp)
+               <= half_h + radius * (sp + cp * (1 + grade));
+    };
     constexpr float turn = 6.2831853f;
     for (const phd::Animal& a : world.animals()) {
         const float x = float(a.x) / 256.0f, y = float(a.y) / 256.0f;
-        if (std::fabs(x - camera.cx) > reach_x || std::fabs(y - camera.cy) > reach_y || animals_.size() >= 40) {
+        // Only longitude can be rejected before elevation and flight height are known.
+        const float length = float(phd::body_length_mm(a.genome, a.growth)) / (phd::cell_decimetres * 100);
+        if (std::abs(x - camera.cx) > half_w + std::max(6.0f, length * 4) + 2) {
             continue;
         }
         const creature::Body body = animal_body(a.genome, a.growth);
@@ -2315,7 +2394,10 @@ void TiltView::pose_world_animals(const phd::World& world, const Camera& camera,
         }
         e.seen = eased_frame_;
         pose.x = e.x, pose.y = e.y, pose.heading = e.heading, pose.phase = e.phase, pose.height = e.height;
-        animals_.push_back({body, pose});
+        if (visible(body, pose)) {
+            pose.gesture = actions_.gesture(a);
+            animals_.push_back({body, pose});
+        }
     }
     if (eased_.size() > 256) {
         for (auto at = eased_.begin(); at != eased_.end();) {
@@ -2324,10 +2406,9 @@ void TiltView::pose_world_animals(const phd::World& world, const Camera& camera,
     }
     // A pale ribbed remnant, lying still at the surface or on the ground.
     // It uses the same depth-tested animal layer as the living swimmers.
-    int remains = 0;
     for (const auto& c : world.carcasses()) {
         const float x = float(c.x) / 256, y = float(c.y) / 256;
-        if (!c.energy || std::fabs(x - camera.cx) > reach_x || std::fabs(y - camera.cy) > reach_y) continue;
+        if (!c.energy) continue;
         creature::Body body;
         body.length = float(c.length_mm) / (phd::cell_decimetres * 100);
         body.girth = body.length * 0.10f;
@@ -2346,13 +2427,94 @@ void TiltView::pose_world_animals(const phd::World& world, const Camera& camera,
             pose.medium = creature::Medium::water;
             pose.height = std::max(ground(x, y) + body.girth, water - body.girth);
         }
-        animals_.push_back({body, pose});
-        if (++remains == 8) break;
+        if (visible(body, pose)) animals_.push_back({body, pose});
     }
+}
+
+void TiltView::upload_animal_mesh(const std::vector<creature::Vertex>& vertices) {
+    gl::BindBuffer(gl::ARRAY_BUFFER, animal_vbo_);
+    gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(vertices.size() * sizeof(creature::Vertex)), vertices.data(),
+                   gl::STREAM_DRAW);
+    using creature::Vertex;
+    const auto stride = gl::GLsizei(sizeof(Vertex));
+    for (int k = 0; k < 5; ++k) {
+        gl::EnableVertexAttribArray(gl::GLuint(k));
+    }
+    gl::VertexAttribPointer(0, 3, gl::FLOAT, 0, stride, reinterpret_cast<const void*>(offsetof(Vertex, x)));
+    gl::VertexAttribPointer(1, 3, gl::BYTE, 1, stride, reinterpret_cast<const void*>(offsetof(Vertex, nx)));
+    gl::VertexAttribPointer(2, 2, gl::FLOAT, 0, stride, reinterpret_cast<const void*>(offsetof(Vertex, along)));
+    gl::VertexAttribPointer(3, 4, gl::UNSIGNED_BYTE, 1, stride, reinterpret_cast<const void*>(offsetof(Vertex, primary)));
+    gl::VertexAttribPointer(4, 4, gl::UNSIGNED_BYTE, 1, stride, reinterpret_cast<const void*>(offsetof(Vertex, secondary)));
+}
+
+void TiltView::draw_animal_mesh(int first, int count, float ink) {
+    const float nudges[5][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {0, 0}};
+    for (int pass = ink > 0 ? 0 : 4; pass < 5; ++pass) {
+        gl::Uniform1f(a_ink_, pass < 4 ? ink : 0.0f);
+        gl::Uniform2f(a_nudge_, nudges[pass][0], nudges[pass][1]);
+        gl::DrawArrays(gl::TRIANGLES, first, count);
+    }
+}
+
+const Texture* TiltView::portrait(const phd::Animal& animal, int width, int height) {
+    if (portrait_.width() != width || portrait_.height() != height || !portrait_.has_alpha()) {
+        if (!portrait_.init(width, height, 1)) return nullptr;
+        portrait_id_ = 0;
+    }
+    const auto g = actions_.gesture(animal);
+    const bool same_body = animal.id == portrait_id_ && animal.growth == portrait_growth_ && animal.medium == portrait_medium_;
+    if (same_body &&
+        g.action == portrait_gesture_.action && g.amount == portrait_gesture_.amount && g.side == portrait_gesture_.side &&
+        g.forward == portrait_gesture_.forward && g.food_height == portrait_gesture_.food_height)
+        return &portrait_.texture();
+
+    if (animal.id != portrait_id_) {
+        portrait_frame_ = creature::frame_portrait(animal_body(animal.genome), width, height);
+    }
+    const creature::Body body = animal_body(animal.genome, animal.growth);
+    const auto medium = phd::Medium(animal.medium);
+    auto pose = creature::portrait_pose(body, medium == phd::Medium::air ? creature::Medium::air :
+                                        medium == phd::Medium::water ? creature::Medium::water : creature::Medium::land);
+    pose.gesture = g;
+    std::vector<creature::Vertex> vertices;
+    creature::build(vertices, body, pose, [](float, float) { return 0.0f; });
+    gl::DepthMask(1);
+    portrait_.begin();
+    gl::ClearColor(0, 0, 0, 0);
+    gl::Clear(gl::COLOR_BUFFER_BIT);
+    gl::Enable(gl::DEPTH_TEST);
+    gl::DepthFunc(gl::LEQUAL);
+    gl::Disable(gl::BLEND);
+    gl::UseProgram(animal_program_);
+    gl::ActiveTexture(gl::TEXTURE0);
+    gl::BindTexture(gl::TEXTURE_2D, animal_patterns_.id);
+    gl::Uniform2f(a_trig_, portrait_frame_.sin_pitch, portrait_frame_.cos_pitch);
+    gl::Uniform1f(a_zoom_, portrait_frame_.zoom);
+    gl::Uniform1f(a_depth_, portrait_frame_.depth_scale);
+    gl::Uniform3f(a_focus_, 0, 0, 0);
+    gl::Uniform4f(a_screen_, float(width), float(height), width * 0.5f - portrait_frame_.cx * portrait_frame_.zoom,
+                  height * 0.5f - portrait_frame_.cy * portrait_frame_.zoom);
+    gl::Uniform4f(a_depth_code_, 0, 0, 1, 1); // opaque pigment, clear background
+    gl::Uniform4f(a_tint_, 1, 1, 1, 1);
+    gl::Uniform1f(a_under_, 0);
+    upload_animal_mesh(vertices);
+    draw_animal_mesh(0, int(vertices.size()), body.girth * 0.9f);
+    gl::DisableVertexAttribArray(3);
+    gl::DisableVertexAttribArray(4);
+    gl::Disable(gl::DEPTH_TEST);
+    gl::Enable(gl::BLEND);
+    gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+    portrait_id_ = animal.id;
+    portrait_growth_ = animal.growth;
+    portrait_medium_ = animal.medium;
+    portrait_gesture_ = g;
+    return &portrait_.texture();
 }
 
 void TiltView::prepare_animals(const phd::World& world, const Camera& camera, int screen_w, int screen_h, int view_h, double time) {
     pieces_.clear();
+    for (auto& batch : distant_animals_) batch.clear();
+    for (auto& layer : animal_layers_) layer.first = layer.end = 0;
     if (!world.has_had_animals()) {
         pose_animals(time);
     } else {
@@ -2377,9 +2539,13 @@ void TiltView::prepare_animals(const phd::World& world, const Camera& camera, in
         float ink, pivot_x, pivot_y, pivot_z, local_near;
         int left, top, width, height; // bounds relative to the body pivot at (0.5, 0.5)
         int atlas_x = 0, atlas_y = 0;
+        std::size_t page = 0;
     };
     std::vector<Run> runs;
-    int atlas_w = std::max(128, layer_.width());
+    int widest = 0, tallest = 0;
+    double tile_area = 0;
+    bool near_water = false;
+    const creature::Ground walking_floor = [&](float x, float y) { return sample_ground(x, y, true, &near_water); };
     const creature::Ground floor = [this](float x, float y) { return ground(x, y); };
     const float sin_pitch = camera.sin_pitch(), cos_pitch = camera.cos_pitch();
     const double px = camera.px();
@@ -2387,11 +2553,12 @@ void TiltView::prepare_animals(const phd::World& world, const Camera& camera, in
     const double camera_y = (double(camera.cy) * sin_pitch - double(camera.focus_z) * cos_pitch) * px;
     for (Animal& animal : animals_) {
         animal.pose.grain = 1 / zoom;
-        const float level = water_level(animal.pose.x, animal.pose.y);
-        const bool shallow = animal.pose.medium == creature::Medium::water && level - animal.pose.height < 0.5f;
-        const float pivot_z = animal.pose.medium == creature::Medium::land
-                                  ? ground(animal.pose.x, animal.pose.y) + creature::ride_height(animal.body)
-                                  : animal.pose.height;
+        const bool walker = animal.pose.medium == creature::Medium::land;
+        const float level = animal.pose.medium == creature::Medium::water ? water_level(animal.pose.x, animal.pose.y) : dry;
+        const bool shallow = level != dry && level - animal.pose.height < 0.5f;
+        near_water = false;
+        const float pivot_z = walker ? walking_floor(animal.pose.x, animal.pose.y) + creature::ride_height(animal.body)
+                                     : animal.pose.height;
         animal.pivot_z = pivot_z;
         const double world_y = (double(animal.pose.y) * sin_pitch - double(pivot_z) * cos_pitch) * px;
         animal.grid_x = TexelGridAxis::place(animal.pose.x * px, camera_x, screen_w, coarse);
@@ -2400,9 +2567,31 @@ void TiltView::prepare_animals(const phd::World& world, const Camera& camera, in
         const int first = int(animal_vertices_.size());
         animal.first_vertex = animal_vertices_.size();
         animal.first_foot = animal_feet_.size();
-        creature::build(animal_vertices_, animal.body, animal.pose, floor, &animal_feet_);
+        const auto& b = animal.body;
+        const float span = std::max({b.length + b.tail + b.tail_fin + b.neck + b.head + b.snout,
+                                     2 * (b.girth + b.side_fins), b.leg_length + b.girth,
+                                     animal.pose.medium == creature::Medium::air ? 2 * b.wing : 0.0f});
+        const bool distant = coarse == 1 && span * px <= 16;
+        creature::build(animal_vertices_, b, animal.pose, walker ? walking_floor : floor,
+                        distant ? nullptr : &animal_feet_, distant ? creature::Detail::distant : creature::Detail::full);
         animal.end_vertex = animal_vertices_.size();
         animal.end_foot = animal_feet_.size();
+        if (distant) {
+            // Replicate the atlas pivot's pixel snap and depth bias directly.
+            // Moving along the camera ray changes only depth, even on a bank.
+            const float bias = near_water ? 0.0f : 0.12f;
+            const float sx = animal.grid_x.shift / zoom, sy = animal.grid_y.shift / zoom;
+            const float dy = sy * sin_pitch + bias * cos_pitch, dz = -sy * cos_pitch + bias * sin_pitch;
+            auto& batch = distant_animals_[shallow];
+            for (std::size_t k = animal.first_vertex; k < animal.end_vertex; ++k) {
+                auto v = animal_vertices_[k];
+                v.x += sx;
+                v.y += dy;
+                v.z += dz;
+                batch.push_back(v);
+            }
+            continue;
+        }
         float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f, nearest = 1e9f, farthest = -1e9f;
         for (std::size_t k = std::size_t(first); k < animal_vertices_.size(); ++k) {
             const auto& v = animal_vertices_[k];
@@ -2429,43 +2618,61 @@ void TiltView::prepare_animals(const phd::World& world, const Camera& camera, in
         runs.push_back({first, count, shallow, std::clamp(animal.body.girth * 0.9f, 0.04f, 0.16f),
                         animal.pose.x, animal.pose.y, pivot_z, nearest - margin,
                         int(x0), int(y0), int(x1 - x0), int(y1 - y0)});
-        atlas_w = std::max(atlas_w, runs.back().width + 2);
-        const bool wading = animal.pose.medium == creature::Medium::land && level != dry;
+        widest = std::max(widest, runs.back().width + 2);
+        tallest = std::max(tallest, runs.back().height + 2);
+        tile_area += double(runs.back().width + 2) * (runs.back().height + 2);
+        // Dry sprites share a forward depth bias with the foliage. At a
+        // shoreline keep true limb depth, even if only one foot is wet.
+        const float piece_depth = pivot_depth - (near_water ? 0.0f : 0.12f);
         pieces_.push_back({display_x + x0 * coarse, display_y + y0 * coarse,
                            display_x + x1 * coarse, display_y + y1 * coarse, display_x, screen_h - display_y, 0, 0,
-                           pivot_depth + nearest - margin, pivot_depth + farthest + margin, 0, shallow || wading});
+                           piece_depth + nearest - margin, piece_depth + farthest + margin, 0, shallow});
     }
     if (runs.empty()) return;
 
     // Each body owns its texels until the scene depth test. Two animals
     // on different local grids can overlap without erasing each other's limbs.
+    const int page_limit = std::min(animal_layer_limit_, std::max({512, widest, tallest}));
+    const auto backing = [page_limit](int extent) {
+        return std::min(page_limit, std::max(128, (extent + 63) / 64 * 64));
+    };
+    const int atlas_w = backing(std::max(widest, int(std::ceil(std::sqrt(tile_area)))));
+    std::size_t page = 0, first = 0;
     int next_x = 0, next_y = 0, row_height = 0;
-    for (Run& run : runs) {
+    const auto finish_page = [&](std::size_t end) {
+        if (animal_layers_.size() == page) animal_layers_.emplace_back();
+        auto& layer = animal_layers_[page];
+        layer.first = first;
+        layer.end = end;
+        const int height = backing(next_y + row_height);
+        if (!layer.target.has_alpha() || layer.target.width() < atlas_w || layer.target.height() < height) {
+            layer.target.init(std::max(layer.target.width(), atlas_w), std::max(layer.target.height(), height), 4);
+        }
+        ++page;
+        first = end;
+    };
+    for (std::size_t i = 0; i < runs.size(); ++i) {
+        auto& run = runs[i];
         // A transparent gutter also covers tie samples on the quad boundary.
-        if (next_x + run.width + 2 > atlas_w) {
+        const int width = std::min(atlas_w, run.width + 2);
+        const int height = std::min(page_limit, run.height + 2);
+        if (next_x + width > atlas_w) {
             next_x = 0;
             next_y += row_height;
             row_height = 0;
         }
-        run.atlas_x = next_x + 1;
-        run.atlas_y = next_y + 1;
-        next_x += run.width + 2;
-        row_height = std::max(row_height, run.height + 2);
+        if (next_y + height > page_limit) {
+            finish_page(i);
+            next_x = next_y = row_height = 0;
+        }
+        run.page = page;
+        run.atlas_x = next_x + (width > run.width);
+        run.atlas_y = next_y + (height > run.height);
+        next_x += width;
+        row_height = std::max(row_height, height);
     }
-    const int atlas_h = std::max(128, next_y + row_height);
-    if (layer_.width() < atlas_w || layer_.height() < atlas_h) {
-        layer_.init(atlas_w, std::max(layer_.height(), atlas_h), 4);
-    }
-    if (!layer_.has_alpha()) {
-        pieces_.clear();
-        animals_.clear();
-        return;
-    }
-    const int max_code = (1 << std::min(layer_.alpha_bits(), 8)) - 1;
+    finish_page(runs.size());
 
-    layer_.begin();
-    gl::ClearColor(0, 0, 0, 0);
-    gl::Clear(gl::COLOR_BUFFER_BIT);
     gl::Enable(gl::DEPTH_TEST);
     gl::DepthFunc(gl::LEQUAL);
     gl::DepthMask(1);
@@ -2480,24 +2687,19 @@ void TiltView::prepare_animals(const phd::World& world, const Camera& camera, in
     std::uint8_t tint[3];
     art::day_tint(world, tint);
     gl::Uniform4f(a_tint_, float(tint[0]) / 255, float(tint[1]) / 255, float(tint[2]) / 255, 1);
-    gl::BindBuffer(gl::ARRAY_BUFFER, animal_vbo_);
-    gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(animal_vertices_.size() * sizeof(creature::Vertex)), animal_vertices_.data(),
-                   gl::STREAM_DRAW);
-    using creature::Vertex;
-    const auto stride = gl::GLsizei(sizeof(Vertex));
-    for (int k = 0; k < 5; ++k) {
-        gl::EnableVertexAttribArray(gl::GLuint(k));
-    }
-    gl::VertexAttribPointer(0, 3, gl::FLOAT, 0, stride, reinterpret_cast<const void*>(offsetof(Vertex, x)));
-    gl::VertexAttribPointer(1, 3, gl::BYTE, 1, stride, reinterpret_cast<const void*>(offsetof(Vertex, nx)));
-    gl::VertexAttribPointer(2, 2, gl::FLOAT, 0, stride, reinterpret_cast<const void*>(offsetof(Vertex, along)));
-    gl::VertexAttribPointer(3, 4, gl::UNSIGNED_BYTE, 1, stride, reinterpret_cast<const void*>(offsetof(Vertex, primary)));
-    gl::VertexAttribPointer(4, 4, gl::UNSIGNED_BYTE, 1, stride, reinterpret_cast<const void*>(offsetof(Vertex, secondary)));
+    upload_animal_mesh(animal_vertices_);
     // The ink first, a pixel each way; then the animal over it. Just under
     // the water it is tinted and has no ink: its edges are soft there.
-    const float nudges[5][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {0, 0}};
     for (std::size_t i = 0; i < runs.size(); ++i) {
         const Run& run = runs[i];
+        auto& layer = animal_layers_[run.page];
+        if (!layer.target.has_alpha()) continue;
+        if (i == layer.first) {
+            layer.target.begin();
+            gl::ClearColor(0, 0, 0, 0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+        }
+        const int max_code = (1 << std::min(layer.target.alpha_bits(), 8)) - 1;
         AnimalPiece& p = pieces_[i];
         gl::Viewport(run.atlas_x, run.atlas_y, run.width, run.height);
         gl::Uniform3f(a_focus_, run.pivot_x, run.pivot_y, run.pivot_z);
@@ -2509,11 +2711,7 @@ void TiltView::prepare_animals(const phd::World& world, const Camera& camera, in
         p.last_code = piece_depth_scale_ >= 0 ? max_code : std::min(max_code, 1 + int(std::ceil(span * zoom)));
         gl::Uniform4f(a_depth_code_, run.local_near, float(p.last_code - 1) / span, 1.0f, 1.0f / float(max_code));
         gl::Uniform1f(a_under_, run.shallow ? 0.42f : 0.0f);
-        for (int pass = run.shallow ? 4 : 0; pass < 5; ++pass) {
-            gl::Uniform1f(a_ink_, pass < 4 ? run.ink : 0.0f);
-            gl::Uniform2f(a_nudge_, nudges[pass][0], nudges[pass][1]);
-            gl::DrawArrays(gl::TRIANGLES, run.first, run.count);
-        }
+        draw_animal_mesh(run.first, run.count, run.shallow ? 0.0f : run.ink);
     }
     gl::DisableVertexAttribArray(3);
     gl::DisableVertexAttribArray(4);
@@ -2528,16 +2726,17 @@ void TiltView::prepare_animals(const phd::World& world, const Camera& camera, in
     }
 }
 
-void TiltView::draw_pieces(bool after_water, float depth_scale, float texel_size) {
+void TiltView::draw_pieces(const AnimalLayer& layer, bool after_water, float depth_scale, float texel_size) {
+    if (layer.first == layer.end || !layer.target.has_alpha()) return;
     piece_vertices_.clear();
-    const int max_code = (1 << std::min(layer_.alpha_bits(), 8)) - 1;
-    for (const AnimalPiece& p : pieces_) {
+    const int max_code = (1 << std::min(layer.target.alpha_bits(), 8)) - 1;
+    for (auto i = layer.first; i < layer.end; ++i) {
+        const auto& p = pieces_[i];
         if (p.after_water != after_water) continue;
         const int intervals = p.last_code - 1;
         const float cells_per_code = intervals ? (p.farthest - p.nearest) / float(intervals) : 0;
         const auto quad = [&](int first, int last) {
-            // Sprites use the same 0.12-cell bias over the terrain.
-            const float z = (p.nearest + (first - 1) * cells_per_code - 0.12f) * depth_scale;
+            const float z = (p.nearest + (first - 1) * cells_per_code) * depth_scale;
             const float lo = float(first) / max_code, hi = float(last) / max_code, slope = cells_per_code * max_code;
             const auto vertex = [&](float x, float y) {
                 return PieceVertex{x, y, z, p.anchor_x, p.anchor_y, p.texel_x, p.texel_y, lo, hi, slope};
@@ -2554,9 +2753,9 @@ void TiltView::draw_pieces(bool after_water, float depth_scale, float texel_size
     if (piece_vertices_.empty()) return;
     gl::UseProgram(piece_program_);
     gl::Uniform1f(piece_depth_scale_, depth_scale * 0.5f);
-    gl::Uniform3f(piece_grid_, 1.0f / texel_size, 1.0f / layer_.width(), 1.0f / layer_.height());
+    gl::Uniform3f(piece_grid_, 1.0f / texel_size, 1.0f / layer.target.width(), 1.0f / layer.target.height());
     gl::ActiveTexture(gl::TEXTURE0);
-    gl::BindTexture(gl::TEXTURE_2D, layer_.texture().id);
+    gl::BindTexture(gl::TEXTURE_2D, layer.target.texture().id);
     gl::BindBuffer(gl::ARRAY_BUFFER, piece_vbo_);
     gl::BufferData(gl::ARRAY_BUFFER, gl::GLsizeiptr(piece_vertices_.size() * sizeof(PieceVertex)), piece_vertices_.data(), gl::STREAM_DRAW);
     const auto stride = gl::GLsizei(sizeof(PieceVertex));
@@ -2569,8 +2768,8 @@ void TiltView::draw_pieces(bool after_water, float depth_scale, float texel_size
     gl::UseProgram(program_);
 }
 
-// Blend water over the bed and its shadows. Leave depth intact for the
-// wading animals and shallow swimmers drawn afterward.
+// Blend water over the bed, shadows and submerged parts of walkers.
+// Leave depth intact for the shallow swimmers drawn afterward.
 void TiltView::draw_water(const phd::World& world, const Camera& camera, int screen_w, int screen_h, int view_h, double time) {
     gl::UseProgram(water_program_);
     gl::Uniform3f(w_focus_, camera.cx, camera.cy, camera.focus_z);
@@ -2644,7 +2843,7 @@ bool TiltView::draw(const phd::World& world, const Camera& camera, const Texture
     const auto sun = art::sun_for(world);
     gl::Uniform3f(u_sun_, sun.x, sun.y, sun.z);
     gl::Uniform1f(u_lit_, 1);
-    const bool ground_ready = !shoreline_study_ || update_ground(world, camera, screen_w, view_h, capture);
+    if (shoreline_study_) bind_ground(camera);
     gl::ActiveTexture(gl::TEXTURE0);
     gl::BindTexture(gl::TEXTURE_2D, terrain.id);
     int caught_up = 0;
@@ -2694,15 +2893,36 @@ bool TiltView::draw(const phd::World& world, const Camera& camera, const Texture
         triangles_ += int(scene_vertices_.size() / 3);
     }
     gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, 0);
-    if (shoreline_study_) {
-        const float texel_size = animal_pixel_size(camera);
-        draw_pieces(false, depth_scale, texel_size);
-        draw_water(world, camera, screen_w, screen_h, view_h, time);
-        gl::DepthMask(1);
-        draw_pieces(true, depth_scale, texel_size);
-    }
+    const float texel_size = animal_pixel_size(camera);
+    const auto draw_distant = [&](bool shallow) {
+        const auto& batch = distant_animals_[shallow];
+        if (batch.empty()) return;
+        gl::UseProgram(animal_program_);
+        gl::BindTexture(gl::TEXTURE_2D, animal_patterns_.id);
+        gl::Uniform3f(a_focus_, camera.cx, camera.cy, camera.focus_z);
+        gl::Uniform2f(a_trig_, camera.sin_pitch(), camera.cos_pitch());
+        gl::Uniform1f(a_zoom_, camera.px());
+        gl::Uniform1f(a_depth_, depth_scale);
+        gl::Uniform4f(a_screen_, float(screen_w), float(screen_h), screen_w * 0.5f, view_h * 0.5f);
+        gl::Uniform4f(a_tint_, tint[0] / 255.0f, tint[1] / 255.0f, tint[2] / 255.0f, 1);
+        gl::Uniform4f(a_depth_code_, 0, 0, 1, 1);
+        gl::Uniform1f(a_under_, shallow ? 0.42f : 0);
+        upload_animal_mesh(batch);
+        draw_animal_mesh(0, int(batch.size()), shallow ? 0 : 0.05f);
+        gl::DisableVertexAttribArray(3);
+        gl::DisableVertexAttribArray(4);
+        gl::UseProgram(program_);
+        draw_calls_ += shallow ? 1 : 5;
+        triangles_ += int(batch.size() / 3) * (shallow ? 1 : 5);
+    };
+    for (const auto& layer : animal_layers_) draw_pieces(layer, false, depth_scale, texel_size);
+    draw_distant(false);
+    if (shoreline_study_) draw_water(world, camera, screen_w, screen_h, view_h, time);
+    gl::DepthMask(1);
+    for (const auto& layer : animal_layers_) draw_pieces(layer, true, depth_scale, texel_size);
+    draw_distant(true);
     gl::Disable(gl::DEPTH_TEST);
-    return ground_ready && plants_ready;
+    return plants_ready;
 }
 
 } // namespace gfx
