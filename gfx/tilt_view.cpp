@@ -21,15 +21,8 @@ namespace {
 struct V3 {
     float x, y, z;
 };
-V3 operator+(V3 a, V3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 V3 operator-(V3 a, V3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 V3 operator*(V3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
-float dot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-V3 cross(V3 a, V3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
-V3 normalize(V3 a) {
-    const float l = std::sqrt(dot(a, a));
-    return l > 0 ? a * (1 / l) : V3{0, 0, 1};
-}
 
 const char* vertex_source = R"(
 attribute vec3 a_position;
@@ -520,7 +513,7 @@ bool TiltView::init(const phd::World& world) {
     gl::GetIntegerv(gl::MAX_RENDERBUFFER_SIZE, &max_buffer);
     animal_layer_limit_ = std::min(max_texture, max_buffer);
     static const char* const attributes[] = {"a_position", "a_uv", "a_color"};
-    const std::string defines = shoreline_study_ ? "#define PAINTED_GROUND\n" : "";
+    const std::string defines = "#define PAINTED_GROUND\n";
     program_ = gl::program((defines + vertex_source).c_str(), (defines + fragment_source).c_str(), attributes, 3);
     if (!program_) {
         return false;
@@ -534,19 +527,17 @@ bool TiltView::init(const phd::World& world) {
     u_texture_ = gl::GetUniformLocation(program_, "u_texture");
     u_sun_ = gl::GetUniformLocation(program_, "u_sun");
     u_lit_ = gl::GetUniformLocation(program_, "u_lit");
-    if (shoreline_study_) {
-        gl::UseProgram(program_);
-        gl::Uniform1i(gl::GetUniformLocation(program_, "u_ground"), 1);
-        gl::Uniform1i(gl::GetUniformLocation(program_, "u_ground_valid"), 2);
-        u_ground_window_ = gl::GetUniformLocation(program_, "u_ground_window");
-        constexpr int patch_size = patch_cells * art::ground::texels_per_cell;
-        constexpr int size = window_patches * patch_size;
-        ground_valid_ = make_texture(window_patches, window_patches, gl::RGBA, nullptr);
-        for (Texture* texture : {&ground_, &ground_half_}) {
-            *texture = make_texture(texture == &ground_ ? size : size / 2, texture == &ground_ ? size : size / 2, gl::RGBA, nullptr);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::GLint(gl::REPEAT));
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::GLint(gl::REPEAT));
-        }
+    gl::UseProgram(program_);
+    gl::Uniform1i(gl::GetUniformLocation(program_, "u_ground"), 1);
+    gl::Uniform1i(gl::GetUniformLocation(program_, "u_ground_valid"), 2);
+    u_ground_window_ = gl::GetUniformLocation(program_, "u_ground_window");
+    constexpr int patch_size = patch_cells * art::ground::texels_per_cell;
+    constexpr int size = window_patches * patch_size;
+    ground_valid_ = make_texture(window_patches, window_patches, gl::RGBA, nullptr);
+    for (Texture* texture : {&ground_, &ground_half_}) {
+        *texture = make_texture(texture == &ground_ ? size : size / 2, texture == &ground_ ? size : size / 2, gl::RGBA, nullptr);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::GLint(gl::REPEAT));
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::GLint(gl::REPEAT));
     }
     gl::GenBuffers(1, &scene_vbo_);
     static const char* const animal_attributes[] = {"a_position", "a_normal", "a_uv", "a_color", "a_secondary"};
@@ -578,88 +569,86 @@ bool TiltView::init(const phd::World& world) {
     piece_grid_ = gl::GetUniformLocation(piece_program_, "u_grid");
     gl::Uniform1i(gl::GetUniformLocation(piece_program_, "u_texture"), 0);
     gl::GenBuffers(1, &piece_vbo_);
-    if (shoreline_study_) {
-        sprite_program_ = gl::program(sprite_vertex_source, sprite_fragment_source, attributes, 3);
-        if (!sprite_program_) {
-            return false;
-        }
-        shadow_program_ = gl::program((std::string("#define SHADOW\n") + vertex_source).c_str(), shadow_fragment_source, attributes, 3);
-        if (!shadow_program_) {
-            return false;
-        }
-        h_focus_ = gl::GetUniformLocation(shadow_program_, "u_focus");
-        h_trig_ = gl::GetUniformLocation(shadow_program_, "u_trig");
-        h_zoom_ = gl::GetUniformLocation(shadow_program_, "u_zoom");
-        h_screen_ = gl::GetUniformLocation(shadow_program_, "u_screen");
-        h_depth_ = gl::GetUniformLocation(shadow_program_, "u_depth");
-        h_alpha_ = gl::GetUniformLocation(shadow_program_, "u_alpha");
-        gl::UseProgram(shadow_program_);
-        gl::Uniform1i(gl::GetUniformLocation(shadow_program_, "u_texture"), 0);
-        static const char* const shadow_attributes[] = {"a_position", "a_mark", "a_axes"};
-        animal_shadow_program_ = gl::program(animal_shadow_vertex_source, animal_shadow_fragment_source, shadow_attributes, 3);
-        if (!animal_shadow_program_) {
-            return false;
-        }
-        animal_shadow_size_ = gl::GetUniformLocation(animal_shadow_program_, "u_size");
-        animal_shadow_texels_ = gl::GetUniformLocation(animal_shadow_program_, "u_texels");
-        gl::GenBuffers(1, &animal_shadow_vbo_);
-        water_program_ = gl::program(water_vertex_source, water_fragment_source, attributes, 3);
-        if (!water_program_) {
-            return false;
-        }
-        w_focus_ = gl::GetUniformLocation(water_program_, "u_focus");
-        w_trig_ = gl::GetUniformLocation(water_program_, "u_trig");
-        w_zoom_ = gl::GetUniformLocation(water_program_, "u_zoom");
-        w_screen_ = gl::GetUniformLocation(water_program_, "u_screen");
-        w_depth_ = gl::GetUniformLocation(water_program_, "u_depth");
-        w_tint_ = gl::GetUniformLocation(water_program_, "u_tint");
-        w_time_ = gl::GetUniformLocation(water_program_, "u_time");
-        w_origin_ = gl::GetUniformLocation(water_program_, "u_origin");
-        gl::UseProgram(water_program_);
-        gl::Uniform1f(gl::GetUniformLocation(water_program_, "u_shore_epsilon"), art::water::shore_epsilon);
-        gl::Uniform1i(gl::GetUniformLocation(water_program_, "u_texture"), 0);
-        {
-            // 128 texels square, four cells: noises that meet themselves at the edges.
-            constexpr int size = 128;
-            std::vector<std::uint8_t> rgba(size * size * 4);
-            const auto smooth = [&](int x, int y, int lattice, std::uint32_t salt) {
-                const int step = size / lattice, ix = x / step, iy = y / step;
-                float fx = float(x % step) / float(step), fy = float(y % step) / float(step);
-                fx = fx * fx * (3 - 2 * fx), fy = fy * fy * (3 - 2 * fy);
-                const auto at = [&](int i, int j) { return float(phd::hash3(i % lattice, j % lattice, salt) & 255) / 255.0f; };
-                const float top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * fx;
-                const float bottom = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * fx;
-                return top + (bottom - top) * fy;
-            };
-            for (int y = 0; y < size; ++y) {
-                for (int x = 0; x < size; ++x) {
-                    auto* p = &rgba[(std::size_t(y) * size + x) * 4];
-                    p[0] = std::uint8_t(smooth(x, y, 16, 0x51a3u) * 255);
-                    p[1] = std::uint8_t(phd::hash3(x, y, 0x77c1u) & 255);
-                    p[2] = std::uint8_t(smooth(x, y, 4, 0x1f0bu) * 255);
-                    p[3] = 255;
-                }
-            }
-            ripples_ = make_texture(size, size, gl::RGBA, rgba.data());
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::GLint(gl::REPEAT));
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::GLint(gl::REPEAT));
-        }
-        s_focus_ = gl::GetUniformLocation(sprite_program_, "u_focus");
-        s_trig_ = gl::GetUniformLocation(sprite_program_, "u_trig");
-        s_zoom_ = gl::GetUniformLocation(sprite_program_, "u_zoom");
-        s_screen_ = gl::GetUniformLocation(sprite_program_, "u_screen");
-        s_depth_ = gl::GetUniformLocation(sprite_program_, "u_depth");
-        s_tint_ = gl::GetUniformLocation(sprite_program_, "u_tint");
-        s_wind_ = gl::GetUniformLocation(sprite_program_, "u_wind");
-        s_texel_ = gl::GetUniformLocation(sprite_program_, "u_texel");
-        s_xray_ = gl::GetUniformLocation(sprite_program_, "u_xray");
-        s_view_ = gl::GetUniformLocation(sprite_program_, "u_view");
-        gl::UseProgram(sprite_program_);
-        gl::Uniform1i(gl::GetUniformLocation(sprite_program_, "u_texture"), 0);
-        gl::GenBuffers(1, &scene_sprite_vbo_);
-        atlas_ = make_texture(atlas_width, atlas_height, gl::RGBA, nullptr);
-        reset_atlas();
+    sprite_program_ = gl::program(sprite_vertex_source, sprite_fragment_source, attributes, 3);
+    if (!sprite_program_) {
+        return false;
     }
+    shadow_program_ = gl::program((std::string("#define SHADOW\n") + vertex_source).c_str(), shadow_fragment_source, attributes, 3);
+    if (!shadow_program_) {
+        return false;
+    }
+    h_focus_ = gl::GetUniformLocation(shadow_program_, "u_focus");
+    h_trig_ = gl::GetUniformLocation(shadow_program_, "u_trig");
+    h_zoom_ = gl::GetUniformLocation(shadow_program_, "u_zoom");
+    h_screen_ = gl::GetUniformLocation(shadow_program_, "u_screen");
+    h_depth_ = gl::GetUniformLocation(shadow_program_, "u_depth");
+    h_alpha_ = gl::GetUniformLocation(shadow_program_, "u_alpha");
+    gl::UseProgram(shadow_program_);
+    gl::Uniform1i(gl::GetUniformLocation(shadow_program_, "u_texture"), 0);
+    static const char* const shadow_attributes[] = {"a_position", "a_mark", "a_axes"};
+    animal_shadow_program_ = gl::program(animal_shadow_vertex_source, animal_shadow_fragment_source, shadow_attributes, 3);
+    if (!animal_shadow_program_) {
+        return false;
+    }
+    animal_shadow_size_ = gl::GetUniformLocation(animal_shadow_program_, "u_size");
+    animal_shadow_texels_ = gl::GetUniformLocation(animal_shadow_program_, "u_texels");
+    gl::GenBuffers(1, &animal_shadow_vbo_);
+    water_program_ = gl::program(water_vertex_source, water_fragment_source, attributes, 3);
+    if (!water_program_) {
+        return false;
+    }
+    w_focus_ = gl::GetUniformLocation(water_program_, "u_focus");
+    w_trig_ = gl::GetUniformLocation(water_program_, "u_trig");
+    w_zoom_ = gl::GetUniformLocation(water_program_, "u_zoom");
+    w_screen_ = gl::GetUniformLocation(water_program_, "u_screen");
+    w_depth_ = gl::GetUniformLocation(water_program_, "u_depth");
+    w_tint_ = gl::GetUniformLocation(water_program_, "u_tint");
+    w_time_ = gl::GetUniformLocation(water_program_, "u_time");
+    w_origin_ = gl::GetUniformLocation(water_program_, "u_origin");
+    gl::UseProgram(water_program_);
+    gl::Uniform1f(gl::GetUniformLocation(water_program_, "u_shore_epsilon"), art::water::shore_epsilon);
+    gl::Uniform1i(gl::GetUniformLocation(water_program_, "u_texture"), 0);
+    {
+        // 128 texels square, four cells: noises that meet themselves at the edges.
+        constexpr int size = 128;
+        std::vector<std::uint8_t> rgba(size * size * 4);
+        const auto smooth = [&](int x, int y, int lattice, std::uint32_t salt) {
+            const int step = size / lattice, ix = x / step, iy = y / step;
+            float fx = float(x % step) / float(step), fy = float(y % step) / float(step);
+            fx = fx * fx * (3 - 2 * fx), fy = fy * fy * (3 - 2 * fy);
+            const auto at = [&](int i, int j) { return float(phd::hash3(i % lattice, j % lattice, salt) & 255) / 255.0f; };
+            const float top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * fx;
+            const float bottom = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * fx;
+            return top + (bottom - top) * fy;
+        };
+        for (int y = 0; y < size; ++y) {
+            for (int x = 0; x < size; ++x) {
+                auto* p = &rgba[(std::size_t(y) * size + x) * 4];
+                p[0] = std::uint8_t(smooth(x, y, 16, 0x51a3u) * 255);
+                p[1] = std::uint8_t(phd::hash3(x, y, 0x77c1u) & 255);
+                p[2] = std::uint8_t(smooth(x, y, 4, 0x1f0bu) * 255);
+                p[3] = 255;
+            }
+        }
+        ripples_ = make_texture(size, size, gl::RGBA, rgba.data());
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::GLint(gl::REPEAT));
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::GLint(gl::REPEAT));
+    }
+    s_focus_ = gl::GetUniformLocation(sprite_program_, "u_focus");
+    s_trig_ = gl::GetUniformLocation(sprite_program_, "u_trig");
+    s_zoom_ = gl::GetUniformLocation(sprite_program_, "u_zoom");
+    s_screen_ = gl::GetUniformLocation(sprite_program_, "u_screen");
+    s_depth_ = gl::GetUniformLocation(sprite_program_, "u_depth");
+    s_tint_ = gl::GetUniformLocation(sprite_program_, "u_tint");
+    s_wind_ = gl::GetUniformLocation(sprite_program_, "u_wind");
+    s_texel_ = gl::GetUniformLocation(sprite_program_, "u_texel");
+    s_xray_ = gl::GetUniformLocation(sprite_program_, "u_xray");
+    s_view_ = gl::GetUniformLocation(sprite_program_, "u_view");
+    gl::UseProgram(sprite_program_);
+    gl::Uniform1i(gl::GetUniformLocation(sprite_program_, "u_texture"), 0);
+    gl::GenBuffers(1, &scene_sprite_vbo_);
+    atlas_ = make_texture(atlas_width, atlas_height, gl::RGBA, nullptr);
+    reset_atlas();
 
     width_ = world.width();
     height_ = world.height();
@@ -689,11 +678,11 @@ void TiltView::build_heights(const phd::World& world) {
     for (int j = 0; j <= height_; ++j) {
         for (int i = 0; i <= width_; ++i) {
             const auto& c = field.corner(i, j);
-            const float now = (shoreline_study_ ? c.bed : c.painted) * relief_;
-            const float bed = shoreline_study_ ? c.bed : c.painted_bed;
-            const float level = shoreline_study_ ? c.level : dry;
-            const float plane = shoreline_study_ && i < width_ && j < height_ ? field.plane(i, j) : dry;
-            const auto center = shoreline_study_ && i < width_ && j < height_ ? c.center : art::water::CellCenter{};
+            const float now = c.bed * relief_;
+            const float bed = c.bed;
+            const float level = c.level;
+            const float plane = i < width_ && j < height_ ? field.plane(i, j) : dry;
+            const auto center = i < width_ && j < height_ ? c.center : art::water::CellCenter{};
             const auto fx = std::int8_t(c.flow_x * 127), fy = std::int8_t(c.flow_y * 127);
             const auto at = std::size_t(j) * (width_ + 1) + i;
             auto& water = water_[at];
@@ -894,7 +883,6 @@ void TiltView::upload_ground(int patch_x, int patch_y, const std::vector<std::ui
 }
 
 bool TiltView::schedule_ground(const phd::World& world, const Camera& camera, int screen_w, int view_h, TerrainBatch* batch) {
-    if (!shoreline_study_) return true;
     // Keep the coverage bounds aligned to eight-cell tiles at both zoom levels.
     const auto first_patch = [](float focus) {
         return 2 * int(std::floor(focus / (2 * patch_cells))) - window_patches / 2;
@@ -984,9 +972,7 @@ float TiltView::sample_ground(float x, float y, bool walking, bool* near_water) 
         const float mesh = drawn_[index];
         if (!walking) return mesh;
         const auto& water = water_[index];
-        // The single-mesh map draws the water as opaque terrain. Put feet
-        // on its underlying bed so that surface can occlude them.
-        const float bed = shoreline_study_ ? mesh : std::min(mesh, water.bed * relief_);
+        const float bed = mesh;
         if (near_water && (water.level != dry || mesh - bed > 0.0001f)) *near_water = true;
         return bed;
     };
@@ -1272,222 +1258,26 @@ void TiltView::draw_animal_shadows(art::Sun sun, const Camera& camera, int scree
     triangles_ += int(animal_shadows_.size() / 3);
 }
 
-void TiltView::build_scene(const phd::World& world, const Camera& camera, const Font& font, double time, int view_w,
-                           int view_h) {
+// The test scene's flat pieces: the shadow under its test plant. Plants and
+// animals themselves are sprites and layers of their own.
+void TiltView::build_scene(const phd::World& world, const Font& font) {
     scene_vertices_.clear();
-    trees_ = 0;
-    const std::uint8_t canopy_alpha = camera.tree_xray ? art::sprites::foliage_alpha : 255;
+    if (!scene_ || scene_plants_.sprites.empty()) {
+        return;
+    }
     float wu, wv;
     font.white(wu, wv);
-    const auto sun_art = art::sun_for(world);
-    const V3 sun{sun_art.x, sun_art.y, sun_art.z};
-    const auto lit = [&](Color c, V3 normal) {
-        const float s = 0.55f + 0.5f * std::max(0.0f, dot(normalize(normal), sun));
-        return Color{std::uint8_t(std::min(255.0f, float(c.r) * s)), std::uint8_t(std::min(255.0f, float(c.g) * s)),
-                     std::uint8_t(std::min(255.0f, float(c.b) * s)), c.a};
+    const auto sun = art::sun_for(world);
+    const float x = scene_x_ - sun.x * 0.6f, y = scene_y_ - sun.y * 0.6f, radius = 0.7f;
+    const Color dark{10, 14, 10, 90};
+    const auto point = [&](float px, float py) {
+        scene_vertices_.push_back({px, py, ground(px, py) + 0.05f, wu, wv, dark});
     };
-    const auto tri = [&](V3 a, V3 b, V3 c, Color color) {
-        scene_vertices_.push_back({a.x, a.y, a.z, wu, wv, color});
-        scene_vertices_.push_back({b.x, b.y, b.z, wu, wv, color});
-        scene_vertices_.push_back({c.x, c.y, c.z, wu, wv, color});
-    };
-    const auto quad = [&](V3 a, V3 b, V3 c, V3 d, Color color, V3 outward) {
-        const Color shaded = lit(color, outward);
-        tri(a, b, c, shaded);
-        tri(a, c, d, shaded);
-    };
-    // A box from p0 to p1 with a square section `thick` across.
-    const auto beam = [&](V3 p0, V3 p1, float thick, Color color) {
-        const V3 d = p1 - p0;
-        V3 side = cross(d, {0, 0, 1});
-        if (dot(side, side) < 1e-8f) {
-            side = {1, 0, 0};
-        }
-        side = normalize(side) * (thick / 2);
-        const V3 up = normalize(cross(side, d)) * (thick / 2);
-        const V3 c[8] = {p0 - side - up, p0 + side - up, p0 + side + up, p0 - side + up,
-                         p1 - side - up, p1 + side - up, p1 + side + up, p1 - side + up};
-        quad(c[0], c[1], c[2], c[3], color, d * -1.0f);
-        quad(c[4], c[7], c[6], c[5], color, d);
-        quad(c[0], c[4], c[5], c[1], color, up * -1.0f);
-        quad(c[3], c[2], c[6], c[7], color, up);
-        quad(c[0], c[3], c[7], c[4], color, side * -1.0f);
-        quad(c[1], c[5], c[6], c[2], color, side);
-    };
-    // A frustum of `sides` faces around an axis from (x, y, z0) up to
-    // (x + lean_x, y + lean_y, z1): the lean is how trees sway.
-    const auto leaning = [&](float x, float y, float z0, float z1, float r0, float r1, int sides, Color color,
-                             float lean_x, float lean_y) {
-        const float ux = x + lean_x, uy = y + lean_y;
-        for (int k = 0; k < sides; ++k) {
-            const float a0 = float(k) * 6.2831853f / float(sides), a1 = float(k + 1) * 6.2831853f / float(sides);
-            const V3 b0{x + std::cos(a0) * r0, y + std::sin(a0) * r0, z0}, b1{x + std::cos(a1) * r0, y + std::sin(a1) * r0, z0};
-            const V3 t0{ux + std::cos(a0) * r1, uy + std::sin(a0) * r1, z1}, t1{ux + std::cos(a1) * r1, uy + std::sin(a1) * r1, z1};
-            const float mid = (a0 + a1) / 2;
-            const V3 out{std::cos(mid) * (z1 - z0), std::sin(mid) * (z1 - z0), r0 - r1};
-            quad(b0, b1, t1, t0, color, out);
-            if (r1 > 0) {
-                tri({ux, uy, z1}, t0, t1, lit(color, {0, 0, 1}));
-            }
-            tri({x, y, z0}, b1, b0, lit(color, {0, 0, -1}));
-        }
-    };
-    const auto frustum = [&](float x, float y, float z0, float z1, float r0, float r1, int sides, Color color) {
-        leaning(x, y, z0, z1, r0, r1, sides, color, 0, 0);
-    };
-    const auto shadow = [&](float x, float y, float radius) {
-        const Color dark{10, 14, 10, 90};
-        for (int k = 0; k < 10; ++k) {
-            const float a0 = float(k) * 0.6283185f, a1 = float(k + 1) * 0.6283185f;
-            const float sx0 = x + std::cos(a0) * radius, sy0 = y + std::sin(a0) * radius;
-            const float sx1 = x + std::cos(a1) * radius, sy1 = y + std::sin(a1) * radius;
-            tri({x, y, ground(x, y) + 0.05f}, {sx0, sy0, ground(sx0, sy0) + 0.05f}, {sx1, sy1, ground(sx1, sy1) + 0.05f}, dark);
-        }
-    };
-
-    // The trees the flat view draws as crowns, standing up: the same spots,
-    // sizes and colours (art::tree_in), so the switch at 32 px per cell keeps
-    // every tree where it was. Those whose tops can reach the view: tall ones
-    // just north of it show above its top edge.
-    {
-        const float half_w = float(view_w) / (2 * camera.px()) + 2;
-        const float reach = float(view_h) / (2 * camera.px() * camera.sin_pitch());
-        const int x0 = std::max(0, int(camera.cx - half_w)), x1 = std::min(width_ - 1, int(camera.cx + half_w));
-        const int y0 = std::max(0, int(camera.cy - reach - 8)), y1 = std::min(height_ - 1, int(camera.cy + reach + 2));
-        // The study draws its plants as sprites (draw_plants), not from here.
-        for (int cy = y0; cy <= (shoreline_study_ ? y0 - 1 : y1); ++cy) {
-            for (int cx = x0; cx <= x1; ++cx) {
-                const auto t = art::tree_in(world, cx, cy);
-                if (t.radius <= 0) {
-                    continue;
-                }
-                ++trees_;
-                const float g = ground(t.x, t.y), r = t.radius, h = std::max(1.2f, t.height);
-                const Color leaves{t.r, t.g, t.b, canopy_alpha}, bark{96, 72, 50, 255};
-                // Sway: the crown leans with the wind and rocks, more for tall
-                // trees and strong wind, each tree on its own beat.
-                const float gust = float(world.wind_speed()) / 96.0f;
-                const float rock = std::sin(float(time) * 1.7f + float(t.id % 97)) * 0.5f + 0.5f;
-                const float sway = gust * (0.3f + 0.7f * rock) * h * 0.025f;
-                const float wx = std::cos(float(world.wind_angle()) * 6.2831853f / 256.0f) * sway;
-                const float wy = std::sin(float(world.wind_angle()) * 6.2831853f / 256.0f) * sway;
-                const auto at = [&](float f) { return f * f; }; // how far up the lean has built
-                if (!t.bare) {
-                    shadow(t.x - sun.x * r * 0.9f, t.y - sun.y * r * 0.9f, r * 0.95f);
-                }
-                leaning(t.x, t.y, g - 0.05f, g + h * 0.45f, 0.08f + 0.05f * r, 0.05f + 0.03f * r, 5, bark, wx * at(0.45f),
-                        wy * at(0.45f));
-                const auto layer = [&](float f0, float f1, float r0, float r1, Color colour) {
-                    leaning(t.x + wx * at(f0), t.y + wy * at(f0), g + h * f0, g + h * f1, r0, r1, 7, colour,
-                            wx * (at(f1) - at(f0)), wy * (at(f1) - at(f0)));
-                };
-                if (t.bare) {
-                    // Winter: a thin, open crown of grey branches.
-                    layer(0.4f, 0.75f, r * 0.15f, r * 0.55f, Color{104, 92, 82, 255});
-                    layer(0.75f, 1.0f, r * 0.55f, r * 0.1f, Color{104, 92, 82, 255});
-                } else if (t.conifer) {
-                    layer(0.2f, 0.62f, r, r * 0.45f, leaves);
-                    layer(0.5f, 1.0f, r * 0.7f, 0.0f, leaves);
-                } else {
-                    layer(0.35f, 0.6f, r * 0.55f, r, leaves);
-                    layer(0.6f, 0.85f, r, r * 0.8f, leaves);
-                    layer(0.85f, 1.0f, r * 0.8f, r * 0.25f, leaves);
-                }
-            }
-        }
-        // Shrubs: woody plants in a cell's quarters, as small domes.
-        for (int cy = y0; cy <= (shoreline_study_ ? y0 - 1 : y1); ++cy) {
-            for (int cx = x0; cx <= x1; ++cx) {
-                const auto i = std::size_t(cy) * width_ + cx;
-                if (world.tree(i)) {
-                    continue;
-                }
-                for (int slot = 0; slot < 4; ++slot) {
-                    const phd::Plant* p = world.occupant(i, slot);
-                    if (!p || !phd::woody(p->genome) || p->height < 4) {
-                        continue;
-                    }
-                    const float sx = float(cx) + 0.25f + 0.5f * float(slot & 1), sy = float(cy) + 0.25f + 0.5f * float(slot >> 1);
-                    const float hh = float(p->height) / float(phd::cell_decimetres), rr = std::min(0.3f, 0.1f + hh * 0.2f);
-                    const float g = ground(sx, sy);
-                    const bool bare = (p->flags & phd::plant_dormant) && !phd::evergreen(p->genome);
-                    const Color c = bare ? Color{112, 96, 80, 255} : Color{std::uint8_t(60 + p->genome.gene[phd::gene_leaf] / 6),
-                                                                          std::uint8_t(110 - p->genome.gene[phd::gene_leaf] / 12), 52, 255};
-                    frustum(sx, sy, g - 0.02f, g + hh * 0.6f, rr * 0.7f, rr, 6, c);
-                    frustum(sx, sy, g + hh * 0.6f, g + hh, rr, rr * 0.3f, 6, c);
-                }
-            }
-        }
-        // Fire: flickering flames over burning cells. (The study paints its own: build_fire.)
-        for (int cy = y0; cy <= (shoreline_study_ ? y0 - 1 : y1); ++cy) {
-            for (int cx = x0; cx <= x1; ++cx) {
-                const int f = world.fire(std::size_t(cy) * width_ + cx);
-                if (!f) {
-                    continue;
-                }
-                for (int k = 0; k < 3; ++k) {
-                    const auto hsh = phd::hash3(cx * 3 + k, cy, std::uint32_t(time * 10));
-                    const float fx = float(cx) + 0.2f + float(hsh & 255) / 255.0f * 0.6f;
-                    const float fy = float(cy) + 0.2f + float(hsh >> 8 & 255) / 255.0f * 0.6f;
-                    const float fh = (0.4f + float(hsh >> 16 & 255) / 255.0f * 0.8f) * float(f) / 8.0f;
-                    const float g = ground(fx, fy);
-                    frustum(fx, fy, g, g + fh, 0.18f, 0.0f, 5, k == 0 ? Color{255, 220, 90, 255} : Color{240, 120, 40, 255});
-                }
-            }
-        }
-    }
-    if (!scene_) {
-        return;
-    }
-
-    // The test plant: a tree about two cells tall.
-    const float tx = scene_x_, ty = scene_y_, tz = ground(tx, ty);
-    if (!shoreline_study_ || !scene_plants_.sprites.empty()) {
-        shadow(tx - sun.x * 0.6f, ty - sun.y * 0.6f, 0.7f);
-    }
-    if (!shoreline_study_) {
-        frustum(tx, ty, tz - 0.05f, tz + 1.0f, 0.10f, 0.06f, 6, {112, 80, 52, 255});
-        frustum(tx, ty, tz + 0.7f, tz + 1.3f, 0.45f, 0.75f, 7, {58, 118, 54, canopy_alpha});
-        frustum(tx, ty, tz + 1.3f, tz + 2.3f, 0.75f, 0.0f, 7, {66, 132, 58, canopy_alpha});
-    }
-
-    if (shoreline_study_) {
-        return;
-    }
-    // The test creature: three segments and six legs, walking a circle
-    // beside the tree, each foot on the ground wherever it steps.
-    const float orbit = 0.7f, angle = float(time) * 0.6f;
-    const float ox = tx + 1.4f, oy = ty + 0.3f;
-    const V3 at{ox + std::cos(angle) * orbit, oy + std::sin(angle) * orbit, 0};
-    const V3 forward{-std::sin(angle), std::cos(angle), 0}, right{std::cos(angle), std::sin(angle), 0};
-    const float base = ground(at.x, at.y);
-    const float body_z = base + 0.24f;
-    shadow(at.x, at.y, 0.32f);
-    const Color shell{176, 92, 58, 255}, head{120, 60, 40, 255}, leg{70, 44, 32, 255};
-    const auto segment = [&](float along, float length, float thick, Color color) {
-        const V3 centre = at + forward * along;
-        const float z = body_z + 0.02f * std::sin(float(time) * 8);
-        beam({centre.x - forward.x * length / 2, centre.y - forward.y * length / 2, z},
-             {centre.x + forward.x * length / 2, centre.y + forward.y * length / 2, z}, thick, color);
-    };
-    segment(-0.26f, 0.34f, 0.24f, shell);
-    segment(0.02f, 0.2f, 0.18f, shell);
-    segment(0.2f, 0.14f, 0.13f, head);
-    for (int pair = 0; pair < 3; ++pair) {
-        for (int side = -1; side <= 1; side += 2) {
-            // Alternating tripods: legs 0 and 2 on one side with 1 on the other.
-            const float phase = float(time) * 8 + float((pair + (side > 0)) % 2) * 3.14159f;
-            const float along = -0.12f + 0.13f * float(pair);
-            const V3 hip = at + forward * along + right * (0.09f * float(side));
-            const V3 foot_xy = at + forward * (along + 0.07f * std::sin(phase)) + right * (0.34f * float(side));
-            const float lift = std::max(0.0f, std::cos(phase)) * 0.05f;
-            const V3 knee_xy = at + forward * along + right * (0.26f * float(side));
-            const V3 hip3{hip.x, hip.y, body_z};
-            const V3 knee3{knee_xy.x, knee_xy.y, body_z + 0.08f + lift};
-            const V3 foot3{foot_xy.x, foot_xy.y, ground(foot_xy.x, foot_xy.y) + lift};
-            beam(hip3, knee3, 0.035f, leg);
-            beam(knee3, foot3, 0.03f, leg);
-        }
+    for (int k = 0; k < 10; ++k) {
+        const float a0 = float(k) * 0.6283185f, a1 = float(k + 1) * 0.6283185f;
+        point(x, y);
+        point(x + std::cos(a0) * radius, y + std::sin(a0) * radius);
+        point(x + std::cos(a1) * radius, y + std::sin(a1) * radius);
     }
 }
 
@@ -2008,7 +1798,7 @@ void TiltView::build_fire(const phd::World& world, const Camera& camera, int scr
 }
 
 void TiltView::draw_fire() {
-    if (!shoreline_study_ || fire_mesh_.sprites.empty()) {
+    if (fire_mesh_.sprites.empty()) {
         return;
     }
     // The sprite program still has this frame's camera from draw_plants.
@@ -2174,7 +1964,7 @@ bool TiltView::draw_plants(const phd::World& world, const Camera& camera, const 
 // goes round a circle, facing the way it goes.
 void TiltView::pose_animals(double time) {
     animals_.clear();
-    if (!shoreline_study_ || !scene_) {
+    if (!scene_) {
         return;
     }
     const float t = float(std::fmod(time, 3600.0));
@@ -2843,7 +2633,7 @@ bool TiltView::draw(const phd::World& world, const Camera& camera, const Texture
     const auto sun = art::sun_for(world);
     gl::Uniform3f(u_sun_, sun.x, sun.y, sun.z);
     gl::Uniform1f(u_lit_, 1);
-    if (shoreline_study_) bind_ground(camera);
+    bind_ground(camera);
     gl::ActiveTexture(gl::TEXTURE0);
     gl::BindTexture(gl::TEXTURE_2D, terrain.id);
     int caught_up = 0;
@@ -2862,12 +2652,10 @@ bool TiltView::draw(const phd::World& world, const Camera& camera, const Texture
             ++caught_up;
             build_chunk(chunk);
         }
-        if (shoreline_study_) {
-            if (chunk.water_stale && !chunk.stale) {
-                build_water(chunk);
-            }
-            visible_.push_back(&chunk);
+        if (chunk.water_stale && !chunk.stale) {
+            build_water(chunk);
         }
+        visible_.push_back(&chunk);
         gl::BindBuffer(gl::ARRAY_BUFFER, chunk.vbo);
         gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, chunk.ibo);
         attributes();
@@ -2876,11 +2664,9 @@ bool TiltView::draw(const phd::World& world, const Camera& camera, const Texture
         triangles_ += chunk.indices / 3;
     }
 
-    if (shoreline_study_) {
-        draw_animal_shadows(sun, camera, screen_w, screen_h, depth_scale);
-    }
-    const bool plants_ready = !shoreline_study_ || draw_plants(world, camera, font, screen_w, screen_h, view_h, time, capture);
-    build_scene(world, camera, font, time, screen_w, view_h);
+    draw_animal_shadows(sun, camera, screen_w, screen_h, depth_scale);
+    const bool plants_ready = draw_plants(world, camera, font, screen_w, screen_h, view_h, time, capture);
+    build_scene(world, font);
     if (!scene_vertices_.empty()) {
         gl::Uniform1f(u_lit_, 0);
         gl::BindTexture(gl::TEXTURE_2D, font.texture().id);
@@ -2917,7 +2703,7 @@ bool TiltView::draw(const phd::World& world, const Camera& camera, const Texture
     };
     for (const auto& layer : animal_layers_) draw_pieces(layer, false, depth_scale, texel_size);
     draw_distant(false);
-    if (shoreline_study_) draw_water(world, camera, screen_w, screen_h, view_h, time);
+    draw_water(world, camera, screen_w, screen_h, view_h, time);
     gl::DepthMask(1);
     for (const auto& layer : animal_layers_) draw_pieces(layer, true, depth_scale, texel_size);
     draw_distant(true);

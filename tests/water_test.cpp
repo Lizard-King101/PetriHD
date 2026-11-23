@@ -102,25 +102,6 @@ bool dev_map_flood() {
 
 int main() {
     if (!dev_map_flood()) return 1;
-    // The simple view draws its water and ground in one mesh. A walking
-    // animal still needs the floor underneath it, including at the bank.
-    {
-        phd::WorldConfig c;
-        c.layout = phd::Layout::arena;
-        c.width = c.height = 32;
-        c.arena_land = 12;
-        c.arena_depth_dm = 5;
-        phd::World pond(c);
-        art::water::Field water(pond, 12, 12, 3, 2);
-        for (int x = 12; x <= 14; ++x) {
-            const auto& corner = water.corner(x, 12);
-            const float expected = (x - 12) * 0.25f;
-            if (std::abs(corner.painted - corner.painted_bed - expected) > 0.0001f) {
-                std::fprintf(stderr, "Wading depth disagrees with the painted bank at x=%d\n", x);
-                return 1;
-            }
-        }
-    }
     phd::WorldConfig config;
     config.width = 128;
     config.height = 96;

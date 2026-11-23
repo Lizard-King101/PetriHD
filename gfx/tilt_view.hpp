@@ -40,8 +40,8 @@ public:
 
     // Display height: cells of height per metre of elevation. True scale is
     // one cell per 1.5 m.
-    TiltView(const CreatureActions& actions, float cells_per_metre, bool shoreline_study)
-        : actions_(actions), relief_(cells_per_metre), shoreline_study_(shoreline_study) {}
+    TiltView(const CreatureActions& actions, float cells_per_metre)
+        : actions_(actions), relief_(cells_per_metre) {}
 
     // Whether the image being drawn into has an alpha channel: shadows use it
     // so that overlapping ones darken the ground once.
@@ -88,7 +88,7 @@ private:
         std::uint64_t built_tick = 0;
         int built_atlas = -1;
         bool stale = false; // the world's heights have moved on from its mesh
-        // The water over it, as a surface of its own (the painted study only).
+        // The water over it, as a surface of its own.
         gl::GLuint water_vbo = 0;
         int water_vertices = 0;
         float water_top = -1e9f; // the highest its water stands
@@ -145,12 +145,10 @@ private:
     bool update_plants(const phd::World& world, const Camera& camera, bool capture);
     bool draw_plants(const phd::World& world, const Camera& camera, const Font& font, int screen_w, int screen_h,
                      int view_h, double time, bool capture);
-    void build_scene(const phd::World& world, const Camera& camera, const Font& font, double time, int view_w,
-                     int view_h);
+    void build_scene(const phd::World& world, const Font& font);
 
     const CreatureActions& actions_;
     float relief_;
-    bool shoreline_study_;
     bool target_alpha_ = false;
     gl::GLuint shadow_program_ = 0;
     gl::GLint h_focus_ = -1, h_trig_ = -1, h_zoom_ = -1, h_screen_ = -1, h_depth_ = -1, h_alpha_ = -1;
@@ -181,7 +179,7 @@ private:
     // stands on this, the ground as drawn, or it would float until then.
     std::vector<float> drawn_;
     std::vector<float> drawn_centers_; // same index as the top-left corner; dry for an unsubdivided cell
-    // The painted study keeps the ground and the water apart: the ground's
+    // The ground and the water are kept apart: the ground's
     // mesh is the bed, and these are the water surface and ice at corners.
     // The surface extends under the banks so its intersection with the bed
     // gives the shoreline.

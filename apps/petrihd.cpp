@@ -9,7 +9,7 @@
 //           [--performance desktop|low] [--pixel N]
 //           [--fullscreen]             (use the current desktop resolution; F11 toggles)
 //           [--shoreline-study]        (open the spring shoreline art study)
-//           [--dev-map]                (a small hand-laid world, drawn the painted way)
+//           [--dev-map]                (a small hand-laid world)
 //           [--brains MODE]            (evolving, frozen, shuffled or neutral)
 //           [--founders FILE]          (founder brains bred by petrihd-nursery)
 //           [--classic]                (start with the five designed founders, not fifty random bodies)
@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
             shoreline_study = true;
         } else if (arg == "--dev-map") {
             // A small hand-laid world for trying things in every kind of
-            // place, drawn the painted way.
+            // place, opened close up with the test plant and animals.
             dev_map = shoreline_study = true;
             config.layout = phd::Layout::development;
             config.width = 128;
@@ -362,7 +362,7 @@ int main(int argc, char** argv) {
         world.seed_animals(animals > 0 ? animals : 48, founder_brains);
     }
     if (brains) world.set_brain_mode(*brains);
-    const long long initial_ticks = skip_ticks.value_or(shoreline_study && load.empty() ? 120 : 0);
+    const long long initial_ticks = skip_ticks.value_or(shoreline_study && load.empty() ? phd::World::ticks_per_day / 2 : 0);
     for (long long t = 0; t < initial_ticks; ++t) {
         step();
     }
@@ -372,7 +372,7 @@ int main(int argc, char** argv) {
     }
 
     actions.set_time(double(world.tick()));
-    gfx::TiltView tilt(actions, relief, shoreline_study);
+    gfx::TiltView tilt(actions, relief);
     if (!tilt.init(world)) {
         return 1;
     }
@@ -395,7 +395,6 @@ int main(int argc, char** argv) {
     Camera camera;
     camera.tree_xray = start_xray;
     camera.top_down = start_top_down;
-    camera.shoreline_study = shoreline_study;
     if (dev_map && at_x < 0 && at_y < 0) {
         at_x = 62; // the level pad, with the wood to the west and the lake to the east
         at_y = 64;
@@ -414,9 +413,11 @@ int main(int argc, char** argv) {
         camera.zoom_about(zoom, sx, sy, float(width), float(view_height));
         clamp_camera();
     };
-    // The test animals start on the development map's pad wherever the view
-    // opens, so a shot of any part of the map finds them in the same places.
-    tilt.place_test_scene(world, dev_map ? 62.0f : camera.cx, dev_map ? 64.0f : camera.cy);
+    // The study and the development map open with the test plant and animals
+    // (O puts them at the focus of any world). On the development map they
+    // start on its pad wherever the view opens, so a shot of any part of the
+    // map finds them in the same places.
+    if (shoreline_study) tilt.place_test_scene(world, dev_map ? 62.0f : camera.cx, dev_map ? 64.0f : camera.cy);
 
     int speed = start_speed.value_or(shoreline_study && !dev_map ? 0 : 1);
     long long tilt_frame = 0;
@@ -426,7 +427,7 @@ int main(int argc, char** argv) {
     std::vector<KindRow> kind_rows;
     int kinds_alive = 0;
     double kinds_counted = -10;
-    double study_animation = start_phase; // the pose in the reference frame, or the one asked for
+    double animation = start_phase; // seconds of sway and stride drawn so far: it stops while paused
     double accumulator = 0, tick_ms = 0, frame_ms = 0, fps = 60, last_frame = now_seconds();
     double last_save = last_frame;
     std::string status;
@@ -703,6 +704,7 @@ int main(int argc, char** argv) {
         // Simulation.
         const double dt = std::min(0.25, frame_start - last_frame);
         last_frame = frame_start;
+        if (speed != 0) animation += dt;
         int ticks = 0;
         if (speeds[speed].multiplier > 0) {
             accumulator += dt * ticks_per_second * speeds[speed].multiplier;
@@ -758,7 +760,7 @@ int main(int argc, char** argv) {
         bool scene_ready = true;
         if (live) {
             // The animals have a picture of their own, drawn before the frame's.
-            tilt.prepare_animals(world, art_camera, art_w, art_h, art_h, shoreline_study ? study_animation : frame_start);
+            tilt.prepare_animals(world, art_camera, art_w, art_h, art_h, animation);
         }
         const phd::Animal* selected = watched ? find_animal(watched) : nullptr;
         const gfx::Texture* portrait = selected ? tilt.portrait(*selected, int(panel_width - 20) / 2, 44) : nullptr;
@@ -777,7 +779,7 @@ int main(int argc, char** argv) {
         if (live_opacity < 1) {
             target.begin();
             batch.begin(art_w, art_h);
-            view.draw(batch, font, world, art_camera, art_w, art_h, frame_start);
+            view.draw(batch, font, world, art_camera, art_w, art_h, animation);
             batch.end();
             world_draws += batch.draw_calls();
             present_world(255);
@@ -823,21 +825,18 @@ int main(int argc, char** argv) {
             if (++tilt_frame % 15 == 0 || capture) {
                 tilt.refresh(world, 2);
             }
-            if (shoreline_study && speed != 0) {
-                study_animation += dt;
-            }
             scene_ready = tilt.draw(world, art_camera, view.live_terrain(), font, art_w, art_h, art_h,
-                                    shoreline_study ? study_animation : frame_start, capture);
+                                    animation, capture);
             // Firelight on what is around a fire, then the sky over it all:
             // cloud shadows, fog, rain, snow and lightning.
             batch.begin(art_w, art_h);
             gl::BlendFunc(gl::DST_COLOR, gl::ONE);
-            view.draw_firelight(batch, world, art_camera, art_w, art_h, shoreline_study ? study_animation : frame_start);
+            view.draw_firelight(batch, world, art_camera, art_w, art_h, animation);
             batch.end();
             world_draws += batch.draw_calls();
             tilt.draw_fire();
             batch.begin(art_w, art_h);
-            view.draw(batch, font, world, art_camera, art_w, art_h, shoreline_study ? study_animation : frame_start, true);
+            view.draw(batch, font, world, art_camera, art_w, art_h, animation, true);
             batch.end();
             world_draws += batch.draw_calls() + tilt.draw_calls();
             present_world(std::uint8_t(std::lround(live_opacity * 255)));

@@ -60,7 +60,7 @@ and shallows at the reference bank. Every plant there is a pixel-art sprite,
 painted once from the plant's size, kind, colour and season
 (`gfx/plant_sprites.cpp`); `build/petrihd-sprites sheet.png` paints a sheet
 of them without opening a window. What works and what doesn't is in
-[docs/SHORELINE_REVIEW.md](docs/SHORELINE_REVIEW.md). This study opens seed 1 at tick 120,
+[docs/SHORELINE_REVIEW.md](docs/SHORELINE_REVIEW.md). This study opens seed 1 at noon on the first day,
 centered on cell (186, 73), at 64 pixels per cell with a 55° camera pitch.
 The ground is painted at the same density wherever the camera goes
 (`gfx/ground_art.cpp`), in the colours of the bird's-eye view, and repainted

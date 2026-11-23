@@ -36,16 +36,12 @@ Corner gather(const phd::World& world, int x, int y) {
                 high_full = std::max(high_full, full);
             }
             if (i == x && j == y) out.center.bed = bed;
-            if (kind == phd::Water::none) {
-                out.painted += bed * 0.25f;
-                continue;
-            }
+            if (kind == phd::Water::none) continue;
             const float depth = float(world.water_depth_dm(cell)) * 0.1f;
             if (i == x && j == y) {
                 const float level = kind == phd::Water::river ? bed + depth : standing_level(world, cell, kind);
                 if (level > bed) out.center.level = level;
             }
-            out.painted += (kind == phd::Water::ocean ? std::max(0.0f, bed) : bed + depth) * 0.25f;
             ++wet;
             frozen += world.temperature(cell) < -20 && (kind != phd::Water::ocean || depth < 3);
             if (kind == phd::Water::river) {
@@ -73,7 +69,7 @@ Corner gather(const phd::World& world, int x, int y) {
     // would dam a channel one cell wide at every corner between its banks,
     // so a corner on a channel lies as low as the channel does: that is cut
     // where a stream can run, not where one is running.
-    out.painted_bed = out.bed = float(bed_sum_dm) * 0.025f;
+    out.bed = float(bed_sum_dm) * 0.025f;
     if (channels) {
         out.channel = true;
         out.bed = std::min(out.bed, channel_bed / float(channels));

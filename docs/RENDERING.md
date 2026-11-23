@@ -39,29 +39,28 @@ tick. Weather overlays and animals continue to draw while the worker paints.
 | --- | --- | --- |
 | 1–24 | Flat map with baked crowns and animal markers | 90° |
 | 24–32 | Smooth crossfade from the flat map to the live scene, half of each at 28 | 90° |
-| above 32 | Tilted (`gfx/tilt_view.cpp`): the same texture over a heightfield, depth-tested, with 3D objects | 72° at 64, 56° at 128, 45° at 256 |
+| above 32 | Tilted (`gfx/tilt_view.cpp`): the same texture over a heightfield, depth-tested, with painted sprites and animals | 55° at 64, 52° at 128, 45° at 256 |
 
 The camera (`gfx/camera.hpp`) is orthographic throughout. Pitch follows
 log2(zoom) between those keys, and zooming keeps the ground under the cursor
 in place. Tilting turns about the ground at the focus, not about sea level.
 
 - The heightfield has one vertex per cell corner and one vertex buffer per
-  chunk. The standard view averages the displayed
-  heights of the four adjacent cells. The shoreline study and dev map draw
-  the bed and the water as separate meshes.
+  chunk. The bed and the water are separate meshes.
 - **Lighting:** the flat bake hill-shades from the sun. Tilted, the bake skips
   that and the shader lights the mesh from its own normals, with the same
   formula and slope scale (`art::shade_metres`), so the change at 32 px per
   cell keeps the same shading. Visible overview tiles receive the new lighting together.
 - **Trees fade between levels of detail from 24 to 32 px per cell.** Flat, they are baked
   crowns. Tilted, the bake leaves the crowns out and paints forest floor
-  (leaf litter, needles) where they were, and the tilted view stands real
-  trees in exactly those places, with the same sizes and colours
-  (`art::tree_in`), casting their own shadows: about 150 triangles each,
-  115 trees and 17,500 triangles in a forest view at 64 px per cell.
-- **Objects:** the test tree and the six-legged test creature are built each
-  frame from flat-shaded boxes and frustums. They stand on `TiltView::ground`,
-  which follows the mesh's own triangles, so feet stay on the drawn surface.
+  (leaf litter, needles) where they were, and the tilted view stands
+  painted trees in exactly those places, with the same sizes and colours
+  (`art::tree_in`), casting their own shadows.
+- **One close view.** Every world is drawn the same way close up: painted
+  ground, plant sprites, water over its bed, and animals. The earlier path
+  that built trees from boxes and drew water into the ground mesh is gone.
+  Everything stands on `TiltView::ground`, which follows the mesh's own
+  triangles, so feet stay on the drawn surface.
 
 ## One palette, one ground
 
@@ -78,7 +77,7 @@ flowers and hill shading. Zooming in changes the detail, not the colours.
   plants standing there, forest floor under canopy, the wet margin and the
   pale waterline, the bed through shallows, deepening water, ice, snow,
   burnt ground, then pebbles, blades of grass and glints.
-- **Ground cache.** With `--shoreline-study` the close view keeps a wrapping
+- **Ground cache.** The close view keeps a wrapping
   2048 × 2048 texture covering 64 cells square. A 16 × 16 validity map tells
   the shader which 4 × 4-cell patches belong to the current window. Other
   patches show the overview texture until their detailed paint arrives.
@@ -88,9 +87,9 @@ flowers and hill shading. Zooming in changes the detail, not the colours.
 - **Below 45 px per cell** a half-size copy (16 texels per cell) is drawn,
   so there is still one texel to a pixel.
 
-## Plant sprites (shoreline study)
+## Plant sprites
 
-With `--shoreline-study`, plants are not built from triangles. Each is a
+Plants are not built from triangles. Each is a
 sprite painted on the CPU (`gfx/plant_sprites.cpp`, no GL) as it looks from
 the three-quarter camera, at 32 texels per cell: one texel per art pixel at
 64 px per cell. A bigger plant gets more pixels, never bigger ones.
@@ -173,9 +172,9 @@ the three-quarter camera, at 32 texels per cell: one texel per art pixel at
 - **In the bird's-eye map a bare tree is its limbs:** five grey spokes with
   the ground between, and no snow lying on them.
 
-## Water (shoreline study)
+## Water
 
-With `--shoreline-study` or `--dev-map`, the tilted view draws water over
+The tilted view draws water over
 the lakebed. The overhead map uses the same shoreline at four texels per cell.
 
 ![A lake shore at 128 px per cell, a river in forest, a frozen stream and the open sea](images/water_surface.png)
@@ -238,14 +237,11 @@ the lakebed. The overhead map uses the same shoreline at four texels per cell.
   standing on the bed, with the water drawn over it. One with a flood gene
   above 155 that reaches at least halfway to the surface also floats pads
   on it, with a flower when it is in bloom.
-- Without the study the water is still painted into the terrain texture and
-  the mesh is its surface, as before.
 
 ## Weather and fire, close up
 
 The tilted view has the sky's part of the bird's-eye view drawn over it
-(`WorldView::draw`, `over_painting`), and with `--shoreline-study` its fires
-are painted sprites.
+(`WorldView::draw`, `over_painting`), and its fires are painted sprites.
 
 ![Rain, snow and morning fog; lightning, a fire by day and a fire at night](images/weather_close.png)
 
@@ -281,7 +277,7 @@ are painted sprites.
 
 ![Firelight at midnight at 64 px per cell, and before dawn at 128](images/firelight.png)
 
-## Animals (the painted study and the development map)
+## Animals
 
 Animals are procedural bodies, drawn so they read as pixel art
 (`gfx/creature.cpp`, and the animal shader in `gfx/tilt_view.cpp`). The
@@ -359,9 +355,7 @@ place, so it moves smoothly at any frame rate. See [ANIMALS.md](ANIMALS.md).
 - **In water.** The water hides whatever its bed is too deep to show, so an
   animal swimming within half a cell of the surface is laid in after the
   water, tinted by it and without ink. Walkers plant their feet on the bed.
-  In the shoreline study each limb texel takes the water colour where the
-  surface crosses it. In the single-mesh view the opaque painted surface hides
-  the submerged part.
+  Each limb texel takes the water colour where the surface crosses it.
 - **Pixel shadows.** Every animal casts its posed mesh along the sun's
   direction onto the terrain. Heads, tails and moving limbs all contribute
   to one silhouette on the creature pixel grid. On land each sole adds

@@ -16,7 +16,6 @@ struct Camera {
     float target_zoom = 2;     // the power-of-two zoom it is moving to
     bool tree_xray = false;   // viewer-only canopy cutaway
     bool top_down = false;     // lock the pitch at straight down
-    bool shoreline_study = false; // show trunks and reeds in profile at habitat zoom
     float scale = 1;           // screen pixels per pixel of what is drawn: the pixel-art grid
 
     static constexpr float flat_limit = 32; // the last zoom that is always top-down
@@ -27,14 +26,14 @@ struct Camera {
         return t * t * (3 - 2 * t);
     }
 
-    // Pitch below the horizontal, in degrees: 90 to 32 px/cell, then 72 at
-    // 64, 56 at 128 and 45 at 256, interpolated on log2(zoom).
+    // Pitch below the horizontal, in degrees: 90 to 32 px/cell, then 55 at
+    // 64, 52 at 128 and 45 at 256, interpolated on log2(zoom).
     float pitch() const {
         if (top_down || zoom <= flat_limit) {
             return 90;
         }
         const float level = std::log2(zoom / flat_limit); // 0 at 32, 1 at 64, 2 at 128, 3 at 256
-        const float keys[] = {90, shoreline_study ? 55.0f : 72.0f, shoreline_study ? 52.0f : 56.0f, 45};
+        const float keys[] = {90, 55, 52, 45}; // low enough at habitat zoom to show trunks and reeds in profile
         const int i = std::min(2, int(level));
         const float t = std::min(1.0f, level - float(i));
         return keys[i] + (keys[i + 1] - keys[i]) * t;
